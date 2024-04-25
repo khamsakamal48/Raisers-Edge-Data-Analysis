@@ -1,0 +1,8 @@
+pandas
+numpy
+requests
+chardet
+python-dotenv
+msal
+psycopg[binary,pool]
+sqlalchemy
