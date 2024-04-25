@@ -6,3 +6,4 @@ python-dotenv
 msal
 psycopg[binary,pool]
 sqlalchemy
+urllib3
