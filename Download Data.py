@@ -350,7 +350,8 @@ try:
         'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns',
         'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships',
         'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses',
-        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences'
+        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences',
+        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes'
     }
 
     # Loop across each data point
