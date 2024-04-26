@@ -213,7 +213,7 @@ try:
 
 except Exception as Argument:
     logging.error(Argument)
-    send_error_emails('Error while refreshing token | Donation to Raisers Edge v2')
+    send_error_emails('Error while refreshing token | Downloading Data from RE for Analysis')
 
 finally:
 
