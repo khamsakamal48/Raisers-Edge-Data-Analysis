@@ -200,9 +200,9 @@ try:
     # Load env variables
     load_dotenv()
     AUTH_CODE = os.getenv('AUTH_CODE')
-    O_CLIENT_ID = os.getenv('O_CLIENT_ID')
-    CLIENT_SECRET = os.getenv('CLIENT_SECRET')
-    TENANT_ID = os.getenv('TENANT_ID')
+    OF_CLIENT_ID = os.getenv('O_CLIENT_ID')
+    OF_CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+    OF_TENANT_ID = os.getenv('TENANT_ID')
     FROM = os.getenv('FROM')
     SEND_TO = eval(os.getenv('SEND_TO'))
     CC_TO = eval(os.getenv('CC_TO'))
