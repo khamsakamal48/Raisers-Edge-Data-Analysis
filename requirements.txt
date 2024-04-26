@@ -4,6 +4,6 @@ requests
 chardet
 python-dotenv
 msal
-psycopg[binary,pool]
+psycopg2
 sqlalchemy
 urllib3
