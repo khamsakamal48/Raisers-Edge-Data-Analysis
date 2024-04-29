@@ -251,11 +251,8 @@ def load_from_json_to_df():
             # Load JSON File
             json_content = json.load(json_file)
 
-            # Load from JSON to pandas
-            reff = pd.DataFrame(flatten(d) for d in json_content['value'])
-
-            # Load to a dataframe
-            df_ = pd.DataFrame(data=reff)
+            # Load from JSON to pandas dataframe
+            df_ = pd.DataFrame(flatten(d) for d in json_content['value'])
 
             # Append/Concat dataframes
             df = pd.concat([df, df_])
@@ -343,7 +340,6 @@ try:
         'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000',
         'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones?limit=5000',
         'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations?limit=5000',
-        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
         'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions?limit=5000',
         'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses?limit=5000',
         'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts?limit=5000',
@@ -352,7 +348,8 @@ try:
         'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships?limit=5000',
         'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000',
         'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000',
-        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000'
+        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000',
+        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
     }
 
     # Loop across each data point
