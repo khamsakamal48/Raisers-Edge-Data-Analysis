@@ -381,12 +381,11 @@ try:
                 data['address'] = data['address'].apply(lambda x: encode_data(x))
 
             case 'constituent_list':
-                data = data.drop(columns=['address.formatted_address', 'email.address', 'online_presence.address',
-                                          'address.address_lines', 'phone.number'])
+                data = data.drop(columns=['address_formatted_address', 'email_address', 'online_presence_address',
+                                          'address_address_lines', 'phone_number'])
 
-        # Export to CSV
-        data.to_csv(f'Data Dumps/{table_name}.csv', quoting=1, lineterminator='\r\n', index=False,
-                    encoding='utf-8')
+        # Export to Parquet
+        data.to_parquet(f'Data Dumps/{table_name}.parquet', index=False)
 
         # Load to SQL Table
         data.to_sql(table_name, con=db_conn, if_exists='replace', index=False)
