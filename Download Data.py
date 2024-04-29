@@ -15,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from sqlalchemy import create_engine
 from urllib.parse import quote_plus
+from flatten_json import flatten
 
 
 ########################################################################################################################
@@ -251,7 +252,7 @@ def load_from_json_to_df():
             json_content = json.load(json_file)
 
             # Load from JSON to pandas
-            reff = pd.json_normalize(json_content['value'])
+            reff = pd.DataFrame(flatten(d) for d in json_content['value'])
 
             # Load to a dataframe
             df_ = pd.DataFrame(data=reff)
@@ -339,19 +340,19 @@ try:
 
     # Data to download
     data_to_download = {
-        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents',
-        'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones',
-        'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations',
-        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields',
-        'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions',
-        'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses',
+        # 'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents',
+        # 'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones',
+        # 'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations',
+        # 'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields',
+        # 'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions',
+        # 'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses',
         'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts',
-        'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields',
-        'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns',
-        'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships',
-        'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses',
-        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences',
-        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes'
+        # 'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields',
+        # 'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns',
+        # 'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships',
+        # 'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses',
+        # 'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences',
+        # 'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes'
     }
 
     # Loop across each data point
