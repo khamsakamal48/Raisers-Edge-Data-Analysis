@@ -237,7 +237,7 @@ def housekeeping():
             pass
 
 
-def load_from_json_to_df():
+def load_from_json_to_df(custom_fields=False):
     logging.info('Loading from JSON to DataFrame')
 
     # Get a list of all the file paths that ends with wildcard from in specified directory
@@ -251,8 +251,16 @@ def load_from_json_to_df():
             # Load JSON File
             json_content = json.load(json_file)
 
-            # Load from JSON to pandas dataframe
-            df_ = pd.DataFrame(flatten(d) for d in json_content['value'])
+            if custom_fields:
+                # Load from JSON to pandas
+                reff = pd.json_normalize(json_content['value'])
+
+                # Load to a dataframe
+                df_ = pd.DataFrame(data=reff)
+
+            else:
+                # Load from JSON to pandas dataframe
+                df_ = pd.DataFrame(flatten(d) for d in json_content['value'])
 
             # Append/Concat dataframes
             df = pd.concat([df, df_])
@@ -361,7 +369,10 @@ try:
         pagination_api_request(endpoint)
 
         # Load to DataFrame
-        data = load_from_json_to_df()
+        if table_name.endswith('custom_fields'):
+            data = load_from_json_to_df(True)
+        else:
+            data = load_from_json_to_df()
 
         # Ensure Data Security & Privacy
         match table_name:
