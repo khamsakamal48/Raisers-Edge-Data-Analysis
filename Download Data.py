@@ -237,7 +237,7 @@ def housekeeping():
             pass
 
 
-def load_from_json_to_df(custom_fields=False):
+def load_from_json_to_df():
     logging.info('Loading from JSON to DataFrame')
 
     # Get a list of all the file paths that ends with wildcard from in specified directory
@@ -251,16 +251,8 @@ def load_from_json_to_df(custom_fields=False):
             # Load JSON File
             json_content = json.load(json_file)
 
-            if custom_fields:
-                # Load from JSON to pandas
-                reff = pd.json_normalize(json_content['value'])
-
-                # Load to a dataframe
-                df_ = pd.DataFrame(data=reff)
-
-            else:
-                # Load from JSON to pandas dataframe
-                df_ = pd.DataFrame(flatten(d) for d in json_content['value'])
+            # Load from JSON to pandas dataframe
+            df_ = pd.DataFrame(flatten(d) for d in json_content['value'])
 
             # Append/Concat dataframes
             df = pd.concat([df, df_])
@@ -357,11 +349,13 @@ try:
         'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000',
         'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000',
         'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000',
-        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
+        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000'
     }
 
     # Loop across each data point
     for table_name, endpoint in data_to_download.items():
+        logging.info(f'Working on {table_name}')
+
         # Housekeeping
         housekeeping()
 
@@ -369,10 +363,7 @@ try:
         pagination_api_request(endpoint)
 
         # Load to DataFrame
-        if table_name.endswith('custom_fields'):
-            data = load_from_json_to_df(True)
-        else:
-            data = load_from_json_to_df()
+        data = load_from_json_to_df()
 
         # Ensure Data Security & Privacy
         match table_name:
@@ -392,10 +383,12 @@ try:
                 data = data.drop(columns=['address_formatted_address', 'email_address', 'online_presence_address',
                                           'address_address_lines', 'phone_number'])
 
-        # Export to Parquet
-        data.to_parquet(f'Data Dumps/{table_name}.parquet', index=False)
+        # Export to CSV
+        logging.info(f'Dumping {table_name} to CSV file')
+        data.to_csv(f'Data Dumps/{table_name}.csv', index=False, quoting=1, lineterminator='\r\n')
 
         # Load to SQL Table
+        logging.info(f'Loading {table_name} to PostgresSQL')
         data.to_sql(table_name, con=db_conn, if_exists='replace', index=False)
 
 except Exception as argument:
