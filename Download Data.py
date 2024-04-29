@@ -353,6 +353,7 @@ try:
         'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000',
         'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000',
         'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000',
+        'fund_list': 'https://api.sky.blackbaud.com/fundraising/v1/funds?limit=5000',
         'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000'
     }
 
