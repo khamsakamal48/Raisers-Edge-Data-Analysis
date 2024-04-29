@@ -7,3 +7,4 @@ msal
 psycopg2
 sqlalchemy
 urllib3
+flatten_json
