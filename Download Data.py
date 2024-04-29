@@ -340,19 +340,19 @@ try:
 
     # Data to download
     data_to_download = {
-        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents',
-        'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones',
-        'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations',
-        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields',
-        'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions',
-        'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses',
-        'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts',
-        'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields',
-        'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns',
-        'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships',
-        'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses',
-        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences',
-        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes'
+        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000',
+        'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones?limit=5000',
+        'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations?limit=5000',
+        'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
+        'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions?limit=5000',
+        'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses?limit=5000',
+        'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts?limit=5000',
+        'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields?limit=5000',
+        'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns?limit=5000',
+        'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships?limit=5000',
+        'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000',
+        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000',
+        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000'
     }
 
     # Loop across each data point
