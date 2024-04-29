@@ -296,9 +296,13 @@ def encode_data(value: str):
 def encode_email(value):
     # If it's an email address
     parts = value.split('@')
-    username, domain = parts[0], parts[1]
-    username = username[0] + 'x' * (len(username) - 2) + username[-1]
-    return f"{username}@{domain}"
+    if len(parts) == 2:  # Check if the split produced exactly two parts
+        username, domain = parts[0], parts[1]
+        username = username[0] + 'x' * (len(username) - 2) + username[-1]
+        return f"{username}@{domain}"
+    else:
+        # If there's no "@" symbol, just return the original value
+        return value
 
 
 try:
