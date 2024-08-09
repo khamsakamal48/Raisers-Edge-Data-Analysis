@@ -341,7 +341,7 @@ try:
 
     # Data to download
     data_to_download = {
-        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000',
+        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000&include_inactive&include_deceased',
         'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones?limit=5000',
         'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations?limit=5000',
         'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions?limit=5000',
