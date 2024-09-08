@@ -381,7 +381,8 @@ try:
             case 'email_list':
                 data['address'] = data['address'].apply(lambda x: encode_email(x))
 
-            case 'online_presence_list' | 'email_list':
+            # case 'online_presence_list' | 'email_list':
+            case 'email_list':
                 data['address'] = data['address'].apply(lambda x: encode_data(x))
 
             case 'constituent_list':
