@@ -260,11 +260,11 @@ def load_from_json_to_df():
     return df
 
 
-def connect_db():
+def connect_db(db):
     logging.info('Connecting to Database')
 
     # Create an engine instance
-    alchemy_engine = create_engine(f'postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_IP}:5432/{DB_NAME}',
+    alchemy_engine = create_engine(f'postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_IP}:5432/{db}',
                                    pool_recycle=3600)
 
     # Connect to PostgresSQL server
@@ -327,7 +327,8 @@ try:
     CC_TO = eval(os.getenv('CC_TO'))
     ERROR_EMAILS_TO = eval(os.getenv('ERROR_EMAILS_TO'))
     DB_IP = os.getenv("DB_IP")
-    DB_NAME = os.getenv("DB_NAME")
+    DB_NAME_1 = os.getenv("DB_NAME_1")
+    DB_NAME_2 = os.getenv("DB_NAME_2")
     DB_USERNAME = os.getenv("DB_USERNAME")
     DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD"))
     AUTH_CODE = os.getenv("AUTH_CODE")
@@ -335,9 +336,6 @@ try:
     CLIENT_ID = os.getenv("CLIENT_ID")
     RE_API_KEY = os.getenv("RE_API_KEY")
     CONSTITUENT_LIST = os.getenv("CONSTITUENT_LIST")
-
-    # Connect to DataBase
-    db_conn = connect_db()
 
     # Data to download
     data_to_download = {
@@ -370,24 +368,24 @@ try:
         # Load to DataFrame
         data = load_from_json_to_df()
 
-        # Ensure Data Security & Privacy
-        match table_name:
-            case 'phone_list':  # Encode contact details
-                data['number'] = data['number'].astype(str).apply(lambda x: encode_data(x))
-
-            case 'address_list':  # Remove Address Lines
-                data = data.drop(columns=['address_lines'])
-
-            case 'email_list':
-                data['address'] = data['address'].apply(lambda x: encode_email(x))
-
-            # case 'online_presence_list' | 'email_list':
-            case 'email_list':
-                data['address'] = data['address'].apply(lambda x: encode_data(x))
-
-            case 'constituent_list':
-                data = data.drop(columns=['address_formatted_address', 'email_address', 'online_presence_address',
-                                          'address_address_lines', 'phone_number'])
+        # # Ensure Data Security & Privacy
+        # match table_name:
+        #     case 'phone_list':  # Encode contact details
+        #         data['number'] = data['number'].astype(str).apply(lambda x: encode_data(x))
+        #
+        #     case 'address_list':  # Remove Address Lines
+        #         data = data.drop(columns=['address_lines'])
+        #
+        #     case 'email_list':
+        #         data['address'] = data['address'].apply(lambda x: encode_email(x))
+        #
+        #     # case 'online_presence_list' | 'email_list':
+        #     case 'email_list':
+        #         data['address'] = data['address'].apply(lambda x: encode_data(x))
+        #
+        #     case 'constituent_list':
+        #         data = data.drop(columns=['address_formatted_address', 'email_address', 'online_presence_address',
+        #                                   'address_address_lines', 'phone_number'])
 
         # Export to CSV
         logging.info(f'Dumping {table_name} to CSV file')
@@ -395,7 +393,18 @@ try:
 
         # Load to SQL Table
         logging.info(f'Loading {table_name} to PostgresSQL')
+
+        # Adding New Data
+        # Connect to DataBase
+        db_conn = connect_db(DB_NAME_1)
         data.to_sql(table_name, con=db_conn, if_exists='replace', index=False)
+
+        # Appending New Data
+        data['downloaded_on'] = pd.Timestamp.now()
+
+        # Connect to DataBase
+        db_conn = connect_db(DB_NAME_2)
+        data.to_sql(table_name, con=db_conn, if_exists='append', index=False)
 
 except Exception as argument:
     logging.error(argument)
