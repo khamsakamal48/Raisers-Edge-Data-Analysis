@@ -10,3 +10,4 @@ urllib3
 flatten_json
 pyarrow
 fastparquet
+psycopg2-binary
