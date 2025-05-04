@@ -11,7 +11,6 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 from datetime import datetime
 
-
 def api_request_strategy():
 
     retry_strategy = Retry(
@@ -200,20 +199,20 @@ try:
     # Load env variables
     load_dotenv()
     AUTH_CODE = os.getenv('AUTH_CODE')
-    OF_CLIENT_ID = os.getenv('O_CLIENT_ID')
-    OF_CLIENT_SECRET = os.getenv('CLIENT_SECRET')
-    OF_TENANT_ID = os.getenv('TENANT_ID')
-    FROM = os.getenv('FROM')
-    SEND_TO = eval(os.getenv('SEND_TO'))
-    CC_TO = eval(os.getenv('CC_TO'))
-    ERROR_EMAILS_TO = eval(os.getenv('ERROR_EMAILS_TO'))
+    # OF_CLIENT_ID = os.getenv('O_CLIENT_ID')
+    # OF_CLIENT_SECRET = os.getenv('CLIENT_SECRET')
+    # OF_TENANT_ID = os.getenv('TENANT_ID')
+    # FROM = os.getenv('FROM')
+    # SEND_TO = eval(os.getenv('SEND_TO'))
+    # CC_TO = eval(os.getenv('CC_TO'))
+    # ERROR_EMAILS_TO = eval(os.getenv('ERROR_EMAILS_TO'))
 
     # Blackbaud Token URL
     get_token()
 
 except Exception as Argument:
     logging.error(Argument)
-    send_error_emails('Error while refreshing token | Downloading Data from RE for Analysis')
+    # send_error_emails('Error while refreshing token | Downloading Data from RE for Analysis')
 
 finally:
 
