@@ -44,95 +44,95 @@ def stop_logging():
     logging.info('Stopping the Script')
 
 
-def send_error_emails(subject, arg):
-    logging.info('Sending email for an error')
-
-    authority = f'https://login.microsoftonline.com/{OF_TENANT_ID}'
-
-    app = msal.ConfidentialClientApplication(
-        client_id=OF_CLIENT_ID,
-        client_credential=OF_CLIENT_SECRET,
-        authority=authority
-    )
-
-    scopes = ["https://graph.microsoft.com/.default"]
-
-    result = app.acquire_token_silent(scopes, account=None)
-
-    if not result:
-        result = app.acquire_token_for_client(scopes=scopes)
-
-        template = """<table style="background-color: #ffffff; border-color: #ffffff; width: auto; margin-left: auto; 
-        margin-right: auto;"> <tbody> <tr style="height: 127px;"> <td style="background-color: #363636; width: 100%; 
-        text-align: center; vertical-align: middle; height: 127px;">&nbsp; <h1><span style="color: 
-        #ffffff;">&nbsp;Raiser's Edge Automation: {job_name} Failed</span>&nbsp;</h1> </td> </tr> <tr style="height: 
-        18px;"> <td style="height: 18px; background-color: #ffffff; border-color: #ffffff;">&nbsp;</td> </tr> <tr 
-        style="height: 18px;"> <td style="width: 100%; height: 18px; background-color: #ffffff; border-color: 
-        #ffffff; text-align: center; vertical-align: middle;">&nbsp;<span style="color: #455362;">This is to notify 
-        you that execution of Auto-updating Alumni records has failed.</span>&nbsp;</td> </tr> <tr style="height: 
-        18px;"> <td style="height: 18px; background-color: #ffffff; border-color: #ffffff;">&nbsp;</td> </tr> <tr 
-        style="height: 61px;"> <td style="width: 100%; background-color: #2f2f2f; height: 61px; text-align: center; 
-        vertical-align: middle;"> <h2><span style="color: #ffffff;">Job details:</span></h2> </td> </tr> <tr 
-        style="height: 52px;"> <td style="height: 52px;"> <table style="background-color: #2f2f2f; width: 100%; 
-        margin-left: auto; margin-right: auto; height: 42px;"> <tbody> <tr> <td style="width: 50%; text-align: 
-        center; vertical-align: middle;">&nbsp;<span style="color: #ffffff;">Job :</span>&nbsp;</td> <td 
-        style="background-color: #ff8e2d; width: 50%; text-align: center; vertical-align: middle;">&nbsp;{
-        job_name}&nbsp;</td> </tr> <tr> <td style="width: 50%; text-align: center; vertical-align: 
-        middle;">&nbsp;<span style="color: #ffffff;">Failed on :</span>&nbsp;</td> <td style="background-color: 
-        #ff8e2d; width: 50%; text-align: center; vertical-align: middle;">&nbsp;{current_time}&nbsp;</td> </tr> 
-        </tbody> </table> </td> </tr> <tr style="height: 18px;"> <td style="height: 18px; background-color: 
-        #ffffff;">&nbsp;</td> </tr> <tr style="height: 18px;"> <td style="height: 18px; width: 100%; 
-        background-color: #ffffff; text-align: center; vertical-align: middle;">Below is the detailed error log,
-        </td> </tr> <tr style="height: 217.34375px;"> <td style="height: 217.34375px; background-color: #f8f9f9; 
-        width: 100%; text-align: left; vertical-align: middle;">{error_log_message}</td> </tr> </tbody> </table>"""
-
-        # Create a text/html message from a rendered template
-        emailbody = template.format(
-            job_name=subject,
-            current_time=datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            error_log_message=arg
-        )
-
-        # Set up attachment data
-        with open(f'Logs/{process_name}.log', 'rb') as f:
-            attachment_content = f.read()
-        attachment_content = base64.b64encode(attachment_content).decode('utf-8')
-
-        if "access_token" in result:
-
-            of_endpoint = f'https://graph.microsoft.com/v1.0/users/{FROM}/sendMail'
-
-            email_msg = {
-                'Message': {
-                    'Subject': subject,
-                    'Body': {
-                        'ContentType': 'HTML',
-                        'Content': emailbody
-                    },
-                    'ToRecipients': get_recipients(ERROR_EMAILS_TO),
-                    'Attachments': [
-                        {
-                            '@odata.type': '#microsoft.graph.fileAttachment',
-                            'name': 'Process.log',
-                            'contentBytes': attachment_content
-                        }
-                    ]
-                },
-                'SaveToSentItems': 'true'
-            }
-
-            requests.post(
-                of_endpoint,
-                headers={
-                    'Authorization': 'Bearer ' + result['access_token']
-                },
-                json=email_msg
-            )
-
-        else:
-            logging.info(result.get('error'))
-            logging.info(result.get('error_description'))
-            logging.info(result.get('correlation_id'))
+# def send_error_emails(subject, arg):
+#     logging.info('Sending email for an error')
+#
+#     authority = f'https://login.microsoftonline.com/{OF_TENANT_ID}'
+#
+#     app = msal.ConfidentialClientApplication(
+#         client_id=OF_CLIENT_ID,
+#         client_credential=OF_CLIENT_SECRET,
+#         authority=authority
+#     )
+#
+#     scopes = ["https://graph.microsoft.com/.default"]
+#
+#     result = app.acquire_token_silent(scopes, account=None)
+#
+#     if not result:
+#         result = app.acquire_token_for_client(scopes=scopes)
+#
+#         template = """<table style="background-color: #ffffff; border-color: #ffffff; width: auto; margin-left: auto;
+#         margin-right: auto;"> <tbody> <tr style="height: 127px;"> <td style="background-color: #363636; width: 100%;
+#         text-align: center; vertical-align: middle; height: 127px;">&nbsp; <h1><span style="color:
+#         #ffffff;">&nbsp;Raiser's Edge Automation: {job_name} Failed</span>&nbsp;</h1> </td> </tr> <tr style="height:
+#         18px;"> <td style="height: 18px; background-color: #ffffff; border-color: #ffffff;">&nbsp;</td> </tr> <tr
+#         style="height: 18px;"> <td style="width: 100%; height: 18px; background-color: #ffffff; border-color:
+#         #ffffff; text-align: center; vertical-align: middle;">&nbsp;<span style="color: #455362;">This is to notify
+#         you that execution of Auto-updating Alumni records has failed.</span>&nbsp;</td> </tr> <tr style="height:
+#         18px;"> <td style="height: 18px; background-color: #ffffff; border-color: #ffffff;">&nbsp;</td> </tr> <tr
+#         style="height: 61px;"> <td style="width: 100%; background-color: #2f2f2f; height: 61px; text-align: center;
+#         vertical-align: middle;"> <h2><span style="color: #ffffff;">Job details:</span></h2> </td> </tr> <tr
+#         style="height: 52px;"> <td style="height: 52px;"> <table style="background-color: #2f2f2f; width: 100%;
+#         margin-left: auto; margin-right: auto; height: 42px;"> <tbody> <tr> <td style="width: 50%; text-align:
+#         center; vertical-align: middle;">&nbsp;<span style="color: #ffffff;">Job :</span>&nbsp;</td> <td
+#         style="background-color: #ff8e2d; width: 50%; text-align: center; vertical-align: middle;">&nbsp;{
+#         job_name}&nbsp;</td> </tr> <tr> <td style="width: 50%; text-align: center; vertical-align:
+#         middle;">&nbsp;<span style="color: #ffffff;">Failed on :</span>&nbsp;</td> <td style="background-color:
+#         #ff8e2d; width: 50%; text-align: center; vertical-align: middle;">&nbsp;{current_time}&nbsp;</td> </tr>
+#         </tbody> </table> </td> </tr> <tr style="height: 18px;"> <td style="height: 18px; background-color:
+#         #ffffff;">&nbsp;</td> </tr> <tr style="height: 18px;"> <td style="height: 18px; width: 100%;
+#         background-color: #ffffff; text-align: center; vertical-align: middle;">Below is the detailed error log,
+#         </td> </tr> <tr style="height: 217.34375px;"> <td style="height: 217.34375px; background-color: #f8f9f9;
+#         width: 100%; text-align: left; vertical-align: middle;">{error_log_message}</td> </tr> </tbody> </table>"""
+#
+#         # Create a text/html message from a rendered template
+#         emailbody = template.format(
+#             job_name=subject,
+#             current_time=datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+#             error_log_message=arg
+#         )
+#
+#         # Set up attachment data
+#         with open(f'Logs/{process_name}.log', 'rb') as f:
+#             attachment_content = f.read()
+#         attachment_content = base64.b64encode(attachment_content).decode('utf-8')
+#
+#         if "access_token" in result:
+#
+#             of_endpoint = f'https://graph.microsoft.com/v1.0/users/{FROM}/sendMail'
+#
+#             email_msg = {
+#                 'Message': {
+#                     'Subject': subject,
+#                     'Body': {
+#                         'ContentType': 'HTML',
+#                         'Content': emailbody
+#                     },
+#                     'ToRecipients': get_recipients(ERROR_EMAILS_TO),
+#                     'Attachments': [
+#                         {
+#                             '@odata.type': '#microsoft.graph.fileAttachment',
+#                             'name': 'Process.log',
+#                             'contentBytes': attachment_content
+#                         }
+#                     ]
+#                 },
+#                 'SaveToSentItems': 'true'
+#             }
+#
+#             requests.post(
+#                 of_endpoint,
+#                 headers={
+#                     'Authorization': 'Bearer ' + result['access_token']
+#                 },
+#                 json=email_msg
+#             )
+#
+#         else:
+#             logging.info(result.get('error'))
+#             logging.info(result.get('error_description'))
+#             logging.info(result.get('correlation_id'))
 
 
 def set_api_request_strategy():
@@ -319,13 +319,13 @@ try:
     # Retrieve contents from .env file
     load_dotenv()
 
-    OF_CLIENT_ID = os.getenv('OF_CLIENT_ID')
-    OF_CLIENT_SECRET = os.getenv('OF_CLIENT_SECRET')
-    OF_TENANT_ID = os.getenv('OF_TENANT_ID')
-    FROM = os.getenv('FROM')
-    SEND_TO = eval(os.getenv('SEND_TO'))
-    CC_TO = eval(os.getenv('CC_TO'))
-    ERROR_EMAILS_TO = eval(os.getenv('ERROR_EMAILS_TO'))
+    # OF_CLIENT_ID = os.getenv('OF_CLIENT_ID')
+    # OF_CLIENT_SECRET = os.getenv('OF_CLIENT_SECRET')
+    # OF_TENANT_ID = os.getenv('OF_TENANT_ID')
+    # FROM = os.getenv('FROM')
+    # SEND_TO = eval(os.getenv('SEND_TO'))
+    # CC_TO = eval(os.getenv('CC_TO'))
+    # ERROR_EMAILS_TO = eval(os.getenv('ERROR_EMAILS_TO'))
     DB_IP = os.getenv("DB_IP")
     DB_NAME_1 = os.getenv("DB_NAME_1")
     DB_NAME_2 = os.getenv("DB_NAME_2")
@@ -408,9 +408,12 @@ try:
 
 except Exception as argument:
     logging.error(argument)
-    send_error_emails('Error while downloading data | Downloading Data from RE for Analysis', argument)
+    # send_error_emails('Error while downloading data | Downloading Data from RE for Analysis', argument)
 
 finally:
+
+    # Housekeeping
+    housekeeping()
 
     # Stop Logging
     stop_logging()
