@@ -4,7 +4,7 @@ requests
 chardet
 python-dotenv
 msal
-psycopg2
+psycopg2-binary
 sqlalchemy
 urllib3
 flatten_json
