@@ -18,8 +18,8 @@ services:
     environment:
       - TZ=Asia/Kolkata
     networks:
-      - raisers-edge-network
+      - local-net
 
 networks:
-  raisers-edge-network:
-    driver: bridge
+  local-net:
+    external: true
