@@ -1,0 +1,9 @@
+# Raiser's Edge Data Analysis Cron Jobs
+#
+# Refresh Token every hour (at minute 0)
+0 * * * * cd /app && /usr/local/bin/python "Refresh Token.py" >> /var/log/cron.log 2>&1
+
+# Download Data every night at 2 AM
+0 2 * * * cd /app && /usr/local/bin/python "Download Data.py" >> /var/log/cron.log 2>&1
+
+# Empty line required at end of crontab file

@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  raisers-edge-data-analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: raisers-edge-data-analysis
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist logs and data dumps
+      - ./Logs:/app/Logs
+      - ./Data Dumps:/app/Data Dumps
+      # Persist token file
+      - ./access_token_output.json:/app/access_token_output.json
+    environment:
+      - TZ=UTC
+    networks:
+      - raisers-edge-network
+
+networks:
+  raisers-edge-network:
+    driver: bridge
