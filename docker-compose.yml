@@ -16,7 +16,7 @@ services:
       # Persist token file
       - ./access_token_output.json:/app/access_token_output.json
     environment:
-      - TZ=UTC
+      - TZ=Asia/Kolkata
     networks:
       - raisers-edge-network
 
