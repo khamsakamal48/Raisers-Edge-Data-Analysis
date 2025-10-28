@@ -342,6 +342,11 @@ if __name__ == "__main__":
     DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD", ""))
     RE_API_KEY = os.getenv("RE_API_KEY")
 
+    # Check if DB_NAME_2 is available and not blank
+    use_db_name_2 = DB_NAME_2 and DB_NAME_2.strip()
+    if not use_db_name_2:
+        logging.info("DB_NAME_2 is not configured or is blank. Skipping all DB_NAME_2 related activities.")
+
     TABLES_WITH_CASCADE = {
         'constituent_list',
         'fund_list',
@@ -435,16 +440,19 @@ if __name__ == "__main__":
                                   method="multi")
                         logging.info(f"DB_NAME_1: Created new table {table_name} with {len(df)} rows")
 
-            # DB_NAME_2: historical append logic
-            with connect_db(DB_NAME_2) as conn2:
-                with conn2.begin():  # Manages the transaction block
-                    df_hist = df.copy()
-                    if not df_hist.empty:
-                        df_hist['downloaded_on'] = pd.Timestamp.now(tz='UTC')
-                        hist_dtype_map = {**dtype_map, 'downloaded_on': DateTime(timezone=True)}
-                        df_hist.to_sql(table_name, con=conn2, if_exists='append', index=False, dtype=hist_dtype_map,
-                                       method="multi")
-                        logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
+            # DB_NAME_2: historical append logic (only if DB_NAME_2 is configured)
+            if use_db_name_2:
+                with connect_db(DB_NAME_2) as conn2:
+                    with conn2.begin():  # Manages the transaction block
+                        df_hist = df.copy()
+                        if not df_hist.empty:
+                            df_hist['downloaded_on'] = pd.Timestamp.now(tz='UTC')
+                            hist_dtype_map = {**dtype_map, 'downloaded_on': DateTime(timezone=True)}
+                            df_hist.to_sql(table_name, con=conn2, if_exists='append', index=False, dtype=hist_dtype_map,
+                                           method="multi")
+                            logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
+            else:
+                logging.debug(f"Skipping DB_NAME_2 operations for {table_name} (not configured)")
 
             table_dfs[table_name] = df
 
