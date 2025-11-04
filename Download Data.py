@@ -330,40 +330,20 @@ def create_fk_constraint(conn, src_table: str, src_col: str, tgt_table: str, tgt
         logging.exception(f"Failed to create FK {fk_name} on {src_table}: {e}")
 
 
-# ------------------------------- Worker function for parallel processing -------------------------------
+# ------------------------------- Download function (sequential) -------------------------------
 
-def process_table_worker(args: Tuple) -> Tuple[str, Optional[pd.DataFrame]]:
+def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.DataFrame:
     """
-    Worker function to process a single table in parallel.
-    Returns (table_name, dataframe) or (table_name, None) on error.
+    Download data for a single table sequentially.
+    Returns the DataFrame with the downloaded data.
     """
-    table_name, endpoint, pk_map, tables_with_cascade, use_db_name_2, env_vars = args
+    logging.info(f"Starting download for {table_name}")
 
-    # Set up logging for this worker
-    worker_log_file = f'Logs/Download_Data_{table_name}.log'
-    logging.basicConfig(
-        filename=worker_log_file,
-        format='%(asctime)s %(levelname)s %(message)s',
-        filemode='w',
-        level=logging.INFO,
-        force=True
-    )
-
-    # Extract environment variables
-    DB_IP = env_vars['DB_IP']
-    DB_NAME_1 = env_vars['DB_NAME_1']
-    DB_NAME_2 = env_vars['DB_NAME_2']
-    DB_USERNAME = env_vars['DB_USERNAME']
-    DB_PASSWORD = env_vars['DB_PASSWORD']
-    RE_API_KEY = env_vars['RE_API_KEY']
-
-    logging.info(f"Worker started processing {table_name}")
-
-    # Set up HTTP session for this worker
+    # Set up HTTP session
     http = set_api_request_strategy()
 
-    # Create a unique process name for this worker
-    process_name = f"worker_{table_name}"
+    # Create a unique process name for this download
+    process_name = f"download_{table_name}"
 
     try:
         # Clean up any old JSON files for this table
@@ -378,10 +358,10 @@ def process_table_worker(args: Tuple) -> Tuple[str, Optional[pd.DataFrame]]:
         token = retrieve_token()
         if not token:
             logging.critical(f"Failed to retrieve API token for {table_name}")
-            return (table_name, None)
+            return pd.DataFrame()
 
         headers = {
-            'Bb-Api-Subscription-Key': RE_API_KEY,
+            'Bb-Api-Subscription-Key': re_api_key,
             'Authorization': 'Bearer ' + token
         }
 
@@ -439,14 +419,61 @@ def process_table_worker(args: Tuple) -> Tuple[str, Optional[pd.DataFrame]]:
             for c in date_cols:
                 df[c] = pd.to_datetime(df[c], utc=True, errors='coerce')
 
-        dtype_map = {c: DateTime(timezone=True) for c in date_cols}
-
         # Export to CSV
         try:
             df.to_csv(f"Data Dumps/{table_name}.csv", index=False, quoting=1, lineterminator='\r\n')
             logging.info(f"Exported {table_name} to CSV with {len(df)} rows")
         except Exception as e:
             logging.warning(f"Failed to export CSV for {table_name}: {e}")
+
+        # Clean up JSON files
+        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
+            try:
+                os.remove(f)
+            except OSError as e:
+                logging.warning(f"Error removing file {f}: {e}")
+
+        logging.info(f"Download completed for {table_name} with {len(df)} rows")
+        return df
+
+    except Exception as e:
+        logging.exception(f"Error downloading {table_name}: {e}")
+        return pd.DataFrame()
+
+
+# ------------------------------- Worker function for parallel database loading -------------------------------
+
+def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
+    """
+    Worker function to load a single table to database in parallel.
+    Returns (table_name, success) where success is True if loading succeeded.
+    """
+    table_name, df, pk_map, tables_with_cascade, use_db_name_2, env_vars = args
+
+    # Set up logging for this worker
+    worker_log_file = f'Logs/Load_Data_{table_name}.log'
+    logging.basicConfig(
+        filename=worker_log_file,
+        format='%(asctime)s %(levelname)s %(message)s',
+        filemode='w',
+        level=logging.INFO,
+        force=True
+    )
+
+    # Extract environment variables
+    DB_IP = env_vars['DB_IP']
+    DB_NAME_1 = env_vars['DB_NAME_1']
+    DB_NAME_2 = env_vars['DB_NAME_2']
+    DB_USERNAME = env_vars['DB_USERNAME']
+    DB_PASSWORD = env_vars['DB_PASSWORD']
+
+    logging.info(f"Worker started loading {table_name} to database")
+
+    try:
+        # Detect date columns for dtype mapping
+        date_cols = [c for c in df.columns if 'date' in c.lower() and 'birth' not in c.lower()
+                     and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
+        dtype_map = {c: DateTime(timezone=True) for c in date_cols}
 
         # DB_NAME_1: truncate & append logic
         with connect_db(DB_NAME_1) as conn1:
@@ -496,19 +523,12 @@ def process_table_worker(args: Tuple) -> Tuple[str, Optional[pd.DataFrame]]:
                                        method="multi")
                         logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
 
-        # Clean up JSON files for this worker
-        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
-            try:
-                os.remove(f)
-            except OSError as e:
-                logging.warning(f"Error removing file {f}: {e}")
-
-        logging.info(f"Worker completed processing {table_name}")
-        return (table_name, df)
+        logging.info(f"Worker completed loading {table_name}")
+        return (table_name, True)
 
     except Exception as e:
-        logging.exception(f"Worker error processing {table_name}: {e}")
-        return (table_name, None)
+        logging.exception(f"Worker error loading {table_name}: {e}")
+        return (table_name, False)
 
 
 # ------------------------------- Main script -------------------------------
@@ -570,42 +590,76 @@ if __name__ == "__main__":
         'DB_NAME_2': DB_NAME_2,
         'DB_USERNAME': DB_USERNAME,
         'DB_PASSWORD': DB_PASSWORD,
-        'RE_API_KEY': RE_API_KEY
     }
+
+    # ============================================================================
+    # PHASE 1: Download all data SEQUENTIALLY
+    # ============================================================================
+    logging.info("=" * 80)
+    logging.info("PHASE 1: Starting sequential download of all tables")
+    logging.info("=" * 80)
+
+    table_dfs: Dict[str, pd.DataFrame] = {}
+
+    for table_name, endpoint in data_to_download.items():
+        logging.info(f"Downloading table: {table_name}")
+        df = download_table_data(table_name, endpoint, RE_API_KEY)
+        if not df.empty:
+            table_dfs[table_name] = df
+            logging.info(f"Successfully downloaded {table_name} with {len(df)} rows")
+        else:
+            logging.warning(f"Downloaded empty or failed to download {table_name}")
+            table_dfs[table_name] = df  # Store empty DataFrame to track attempt
+
+    logging.info(f"Sequential download completed. Downloaded {len([t for t, df in table_dfs.items() if not df.empty])} tables successfully.")
+
+    # ============================================================================
+    # PHASE 2: Load all data to database IN PARALLEL
+    # ============================================================================
+    logging.info("=" * 80)
+    logging.info("PHASE 2: Starting parallel loading to database")
+    logging.info("=" * 80)
 
     # Determine number of worker processes (use up to 75% of available cores, minimum 1)
     max_workers = max(1, int(cpu_count() * 0.75))
-    logging.info(f"Starting parallel processing with {max_workers} workers (detected {cpu_count()} cores)")
+    logging.info(f"Starting parallel database loading with {max_workers} workers (detected {cpu_count()} cores)")
 
-    # Prepare arguments for each table
-    worker_args = []
-    for table_name, endpoint in data_to_download.items():
-        worker_args.append((table_name, endpoint, pk_map, TABLES_WITH_CASCADE, use_db_name_2, env_vars))
+    # Prepare arguments for each table to load
+    load_worker_args = []
+    for table_name, df in table_dfs.items():
+        if not df.empty:  # Only load non-empty DataFrames
+            load_worker_args.append((table_name, df, pk_map, TABLES_WITH_CASCADE, use_db_name_2, env_vars))
 
-    # Process tables in parallel
-    table_dfs: Dict[str, pd.DataFrame] = {}
+    # Load tables to database in parallel
+    load_results: Dict[str, bool] = {}
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_table = {executor.submit(process_table_worker, args): args[0] for args in worker_args}
+        # Submit all load tasks
+        future_to_table = {executor.submit(load_table_to_db_worker, args): args[0] for args in load_worker_args}
 
         # Process completed tasks as they finish
         for future in as_completed(future_to_table):
             table_name = future_to_table[future]
             try:
-                result_table_name, df = future.result()
-                if df is not None:
-                    table_dfs[result_table_name] = df
-                    logging.info(f"Successfully completed processing {result_table_name} with {len(df)} rows")
+                result_table_name, success = future.result()
+                load_results[result_table_name] = success
+                if success:
+                    logging.info(f"Successfully loaded {result_table_name} to database")
                 else:
-                    logging.error(f"Failed to process {result_table_name}")
+                    logging.error(f"Failed to load {result_table_name} to database")
             except Exception as e:
-                logging.exception(f"Exception occurred while processing {table_name}: {e}")
+                logging.exception(f"Exception occurred while loading {table_name}: {e}")
+                load_results[table_name] = False
 
-    logging.info(f"Parallel processing completed. Processed {len(table_dfs)} tables successfully.")
+    successful_loads = sum(1 for success in load_results.values() if success)
+    logging.info(f"Parallel database loading completed. Loaded {successful_loads}/{len(load_results)} tables successfully.")
 
-    # --- PHASE 1 & 2: Create PKs, FKs, and Indexes ---
-    logging.info("--- Post-processing: Creating keys and indexes on DB_NAME_1 ---")
+    # ============================================================================
+    # PHASE 3: Post-processing - Create PKs, FKs, and Indexes
+    # ============================================================================
+    logging.info("=" * 80)
+    logging.info("PHASE 3: Post-processing - Creating keys and indexes on DB_NAME_1")
+    logging.info("=" * 80)
 
     CUSTOM_FK_RULES = [
         ('action_list', 'constituent_id', 'constituent_list', 'id'),
