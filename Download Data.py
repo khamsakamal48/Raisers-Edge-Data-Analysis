@@ -467,7 +467,7 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
     DB_USERNAME = env_vars['DB_USERNAME']
     DB_PASSWORD = env_vars['DB_PASSWORD']
 
-    logging.info(f"Worker started loading {table_name} to database")
+    logging.info(f"Worker started loading {table_name} to database (DataFrame size: {len(df)} rows, {df.memory_usage(deep=True).sum() / 1024 / 1024:.2f} MB)")
 
     try:
         # Detect date columns for dtype mapping
@@ -526,9 +526,20 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
         logging.info(f"Worker completed loading {table_name}")
         return (table_name, True)
 
+    except MemoryError as e:
+        logging.exception(f"Worker ran out of memory loading {table_name}: {e}")
+        logging.error(f"Consider reducing max_workers or splitting {table_name} into smaller chunks")
+        return (table_name, False)
     except Exception as e:
         logging.exception(f"Worker error loading {table_name}: {e}")
         return (table_name, False)
+    finally:
+        # Explicit cleanup to help with memory management
+        try:
+            import gc
+            gc.collect()
+        except:
+            pass
 
 
 # ------------------------------- Main script -------------------------------
@@ -620,8 +631,9 @@ if __name__ == "__main__":
     logging.info("PHASE 2: Starting parallel loading to database")
     logging.info("=" * 80)
 
-    # Determine number of worker processes (use up to 75% of available cores, minimum 1)
-    max_workers = max(1, int(cpu_count() * 0.75))
+    # Determine number of worker processes (use up to 50% of available cores, minimum 1, max 8)
+    # Reduced from 75% to prevent memory exhaustion with large datasets
+    max_workers = min(8, max(1, int(cpu_count() * 0.5)))
     logging.info(f"Starting parallel database loading with {max_workers} workers (detected {cpu_count()} cores)")
 
     # Prepare arguments for each table to load
@@ -652,7 +664,11 @@ if __name__ == "__main__":
                 load_results[table_name] = False
 
     successful_loads = sum(1 for success in load_results.values() if success)
+    failed_loads = [table for table, success in load_results.items() if not success]
     logging.info(f"Parallel database loading completed. Loaded {successful_loads}/{len(load_results)} tables successfully.")
+    if failed_loads:
+        logging.warning(f"Failed tables: {', '.join(failed_loads)}")
+        logging.warning("Phase 3 will skip post-processing for failed tables.")
 
     # ============================================================================
     # PHASE 3: Post-processing - Create PKs, FKs, and Indexes
@@ -678,23 +694,50 @@ if __name__ == "__main__":
     ]
 
     with connect_db(DB_NAME_1) as conn:
-        with conn.begin():  # Manages one transaction for all post-processing
-            logging.info("Phase 1: Creating Primary Keys")
-            for t, c in pk_plan:
-                if t in table_dfs and c in table_dfs[t].columns:
-                    add_primary_key(conn, t, c)
+        # Phase 1: Creating Primary Keys (each in its own transaction)
+        logging.info("Phase 1: Creating Primary Keys")
+        for t, c in pk_plan:
+            # Only process tables that were successfully loaded
+            if not load_results.get(t, False):
+                logging.warning(f"Skipping PK creation for {t}: table was not successfully loaded")
+                continue
 
-            logging.info("Phase 2: Creating Indexes and Foreign Keys")
-            for src_table, src_col, tgt_table, tgt_col in CUSTOM_FK_RULES:
-                if src_table in table_dfs and src_col in table_dfs[src_table].columns:
-                    create_index_if_not_exists(conn, src_table, src_col)
+            if t in table_dfs and c in table_dfs[t].columns:
+                try:
+                    with conn.begin():  # Individual transaction for each PK
+                        add_primary_key(conn, t, c)
+                except Exception as e:
+                    logging.error(f"Failed to create PK on {t}({c}), but continuing: {e}")
+                    # Continue with next table instead of failing everything
 
-                if tgt_table in table_dfs and tgt_col in table_dfs[tgt_table].columns:
-                    create_index_if_not_exists(conn, tgt_table, tgt_col)
+        # Phase 2: Creating Indexes and Foreign Keys (each in its own transaction)
+        logging.info("Phase 2: Creating Indexes and Foreign Keys")
+        for src_table, src_col, tgt_table, tgt_col in CUSTOM_FK_RULES:
+            # Only process if both source and target tables were successfully loaded
+            if not load_results.get(src_table, False):
+                logging.warning(f"Skipping FK {src_table}.{src_col}: source table was not successfully loaded")
+                continue
+            if not load_results.get(tgt_table, False):
+                logging.warning(f"Skipping FK {src_table}.{src_col}: target table {tgt_table} was not successfully loaded")
+                continue
 
-                src_values = table_dfs.get(src_table, pd.DataFrame()).get(src_col)
-                tgt_values = table_dfs.get(tgt_table, pd.DataFrame()).get(tgt_col)
-                create_fk_constraint(conn, src_table, src_col, tgt_table, tgt_col, src_values, tgt_values)
+            try:
+                with conn.begin():  # Individual transaction for indexes
+                    if src_table in table_dfs and src_col in table_dfs[src_table].columns:
+                        create_index_if_not_exists(conn, src_table, src_col)
+
+                    if tgt_table in table_dfs and tgt_col in table_dfs[tgt_table].columns:
+                        create_index_if_not_exists(conn, tgt_table, tgt_col)
+            except Exception as e:
+                logging.error(f"Failed to create indexes for FK {src_table}.{src_col}, but continuing: {e}")
+
+            try:
+                with conn.begin():  # Individual transaction for FK
+                    src_values = table_dfs.get(src_table, pd.DataFrame()).get(src_col)
+                    tgt_values = table_dfs.get(tgt_table, pd.DataFrame()).get(tgt_col)
+                    create_fk_constraint(conn, src_table, src_col, tgt_table, tgt_col, src_values, tgt_values)
+            except Exception as e:
+                logging.error(f"Failed to create FK {src_table}.{src_col}, but continuing: {e}")
 
     housekeeping()
     logging.info("--- Script finished successfully ---")
