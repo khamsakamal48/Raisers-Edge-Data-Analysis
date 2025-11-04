@@ -154,7 +154,7 @@ def connect_db(dbname: str):
         return conn
     except Exception as e:
         logging.critical(f"Failed to connect to database {dbname}: {e}")
-        sys.exit(1)
+        raise  # Raise exception instead of sys.exit to allow proper error handling in workers
 
 
 def table_exists(conn, table_name: str) -> bool:
@@ -448,7 +448,7 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
     Worker function to load a single table to database in parallel.
     Returns (table_name, success) where success is True if loading succeeded.
     """
-    table_name, df, pk_map, tables_with_cascade, use_db_name_2, env_vars = args
+    table_name, df, pk_map, tables_with_cascade, tables_skip_truncate, use_db_name_2, env_vars = args
 
     # Set up logging for this worker
     worker_log_file = f'Logs/Load_Data_{table_name}.log'
@@ -496,15 +496,25 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                     if intended_pk:
                         df = remove_duplicates_from_df(df, intended_pk)
 
-                    disable_foreign_keys(conn1, table_name)
-                    use_cascade = table_name in tables_with_cascade
-                    truncate_table(conn1, table_name, use_cascade=use_cascade)
+                    # Disable foreign keys and ensure they're re-enabled even on error
+                    try:
+                        disable_foreign_keys(conn1, table_name)
 
-                    if not df.empty:
-                        df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
-                                  method="multi")
+                        # Skip truncation if this table will be truncated by a parent's CASCADE
+                        # This prevents lock contention during parallel loading
+                        if table_name not in tables_skip_truncate:
+                            use_cascade = table_name in tables_with_cascade
+                            truncate_table(conn1, table_name, use_cascade=use_cascade)
+                        else:
+                            logging.info(f"Skipping truncate for {table_name} (will be cascaded by parent table)")
 
-                    enable_foreign_keys(conn1, table_name)
+                        if not df.empty:
+                            df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
+                                      method="multi")
+                    finally:
+                        # Always re-enable foreign keys, even if an error occurred
+                        enable_foreign_keys(conn1, table_name)
+
                     logging.info(f"DB_NAME_1: Truncated and appended {len(df)} rows to {table_name}")
                 else:
                     df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
@@ -566,6 +576,13 @@ if __name__ == "__main__":
         'fund_list',
         'campaign_list',
         'gift_list',
+    }
+
+    # Tables that should NOT be truncated because their parent uses CASCADE
+    # This prevents lock contention during parallel loading
+    TABLES_SKIP_TRUNCATE = {
+        'gift_custom_fields',  # Will be cascaded by gift_list
+        # Add other child tables here if they have CASCADE parents and are loaded in parallel
     }
 
     data_to_download = {
@@ -640,7 +657,7 @@ if __name__ == "__main__":
     load_worker_args = []
     for table_name, df in table_dfs.items():
         if not df.empty:  # Only load non-empty DataFrames
-            load_worker_args.append((table_name, df, pk_map, TABLES_WITH_CASCADE, use_db_name_2, env_vars))
+            load_worker_args.append((table_name, df, pk_map, TABLES_WITH_CASCADE, TABLES_SKIP_TRUNCATE, use_db_name_2, env_vars))
 
     # Load tables to database in parallel
     load_results: Dict[str, bool] = {}
