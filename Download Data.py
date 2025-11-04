@@ -3,7 +3,9 @@ import logging
 import json
 import sys
 import glob
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Manager, cpu_count
 
 import pandas as pd
 import requests
@@ -328,6 +330,187 @@ def create_fk_constraint(conn, src_table: str, src_col: str, tgt_table: str, tgt
         logging.exception(f"Failed to create FK {fk_name} on {src_table}: {e}")
 
 
+# ------------------------------- Worker function for parallel processing -------------------------------
+
+def process_table_worker(args: Tuple) -> Tuple[str, Optional[pd.DataFrame]]:
+    """
+    Worker function to process a single table in parallel.
+    Returns (table_name, dataframe) or (table_name, None) on error.
+    """
+    table_name, endpoint, pk_map, tables_with_cascade, use_db_name_2, env_vars = args
+
+    # Set up logging for this worker
+    worker_log_file = f'Logs/Download_Data_{table_name}.log'
+    logging.basicConfig(
+        filename=worker_log_file,
+        format='%(asctime)s %(levelname)s %(message)s',
+        filemode='w',
+        level=logging.INFO,
+        force=True
+    )
+
+    # Extract environment variables
+    DB_IP = env_vars['DB_IP']
+    DB_NAME_1 = env_vars['DB_NAME_1']
+    DB_NAME_2 = env_vars['DB_NAME_2']
+    DB_USERNAME = env_vars['DB_USERNAME']
+    DB_PASSWORD = env_vars['DB_PASSWORD']
+    RE_API_KEY = env_vars['RE_API_KEY']
+
+    logging.info(f"Worker started processing {table_name}")
+
+    # Set up HTTP session for this worker
+    http = set_api_request_strategy()
+
+    # Create a unique process name for this worker
+    process_name = f"worker_{table_name}"
+
+    try:
+        # Clean up any old JSON files for this table
+        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
+            try:
+                os.remove(f)
+            except OSError as e:
+                logging.warning(f"Error removing file {f}: {e}")
+
+        # Paginate API and save to JSON files
+        logging.info(f"Downloading data for {table_name}")
+        token = retrieve_token()
+        if not token:
+            logging.critical(f"Failed to retrieve API token for {table_name}")
+            return (table_name, None)
+
+        headers = {
+            'Bb-Api-Subscription-Key': RE_API_KEY,
+            'Authorization': 'Bearer ' + token
+        }
+
+        url = endpoint
+        page_num = 1
+        while url:
+            try:
+                response = http.get(url, params={}, headers=headers)
+                response.raise_for_status()
+                resp = response.json()
+
+                file_path = f'API_Response_RE_{process_name}_{page_num}.json'
+                with open(file_path, 'w', encoding='utf-8') as fh:
+                    json.dump(resp, fh, ensure_ascii=False, indent=2)
+
+                next_link = resp.get('next_link') or resp.get('next')
+                if next_link:
+                    url = next_link
+                    page_num += 1
+                else:
+                    break
+            except requests.exceptions.RequestException as e:
+                logging.error(f"API request failed for {table_name} at {url}: {e}")
+                break
+
+        # Load JSON files into DataFrame
+        file_list = glob.glob(f'API_Response_RE_{process_name}_*.json')
+        all_dfs = []
+        for each_file in file_list:
+            with open(each_file, 'r', encoding='utf-8') as fh:
+                content = json.load(fh)
+
+            vals = content.get('value', [])
+            if not isinstance(vals, list):
+                logging.warning(f"{each_file}: 'value' is not a list; skipping")
+                continue
+
+            if vals:
+                df_part = pd.DataFrame((flatten(v) for v in vals))
+                all_dfs.append(df_part)
+
+        if not all_dfs:
+            df = pd.DataFrame()
+        else:
+            df = pd.concat(all_dfs, ignore_index=True)
+
+            id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id', 'campaign_id')]
+            for col in id_cols:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+
+        # Detect and convert date columns
+        date_cols = [c for c in df.columns if 'date' in c.lower() and 'birth' not in c.lower()
+                     and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
+        if date_cols:
+            for c in date_cols:
+                df[c] = pd.to_datetime(df[c], utc=True, errors='coerce')
+
+        dtype_map = {c: DateTime(timezone=True) for c in date_cols}
+
+        # Export to CSV
+        try:
+            df.to_csv(f"Data Dumps/{table_name}.csv", index=False, quoting=1, lineterminator='\r\n')
+            logging.info(f"Exported {table_name} to CSV with {len(df)} rows")
+        except Exception as e:
+            logging.warning(f"Failed to export CSV for {table_name}: {e}")
+
+        # DB_NAME_1: truncate & append logic
+        with connect_db(DB_NAME_1) as conn1:
+            with conn1.begin():
+                if table_exists(conn1, table_name):
+                    intended_pk = pk_map.get(table_name)
+
+                    # Check for and correct a wrongly defined primary key
+                    existing_pk_col = get_primary_key_column(conn1, table_name)
+                    if existing_pk_col and intended_pk and existing_pk_col != intended_pk:
+                        logging.warning(f"Table '{table_name}' has an incorrect PK on '{existing_pk_col}'. "
+                                        f"Expected '{intended_pk}'. Dropping the incorrect constraint.")
+                        pk_constraint_name = get_primary_key_constraint_name(conn1, table_name)
+                        if pk_constraint_name:
+                            conn1.execute(text(
+                                f'ALTER TABLE public."{table_name}" DROP CONSTRAINT IF EXISTS "{pk_constraint_name}";'))
+                            logging.info(f"Dropped incorrect PK constraint '{pk_constraint_name}'.")
+
+                    # Remove duplicates
+                    if intended_pk:
+                        df = remove_duplicates_from_df(df, intended_pk)
+
+                    disable_foreign_keys(conn1, table_name)
+                    use_cascade = table_name in tables_with_cascade
+                    truncate_table(conn1, table_name, use_cascade=use_cascade)
+
+                    if not df.empty:
+                        df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
+                                  method="multi")
+
+                    enable_foreign_keys(conn1, table_name)
+                    logging.info(f"DB_NAME_1: Truncated and appended {len(df)} rows to {table_name}")
+                else:
+                    df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
+                              method="multi")
+                    logging.info(f"DB_NAME_1: Created new table {table_name} with {len(df)} rows")
+
+        # DB_NAME_2: historical append logic
+        if use_db_name_2:
+            with connect_db(DB_NAME_2) as conn2:
+                with conn2.begin():
+                    df_hist = df.copy()
+                    if not df_hist.empty:
+                        df_hist['downloaded_on'] = pd.Timestamp.now(tz='UTC')
+                        hist_dtype_map = {**dtype_map, 'downloaded_on': DateTime(timezone=True)}
+                        df_hist.to_sql(table_name, con=conn2, if_exists='append', index=False, dtype=hist_dtype_map,
+                                       method="multi")
+                        logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
+
+        # Clean up JSON files for this worker
+        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
+            try:
+                os.remove(f)
+            except OSError as e:
+                logging.warning(f"Error removing file {f}: {e}")
+
+        logging.info(f"Worker completed processing {table_name}")
+        return (table_name, df)
+
+    except Exception as e:
+        logging.exception(f"Worker error processing {table_name}: {e}")
+        return (table_name, None)
+
+
 # ------------------------------- Main script -------------------------------
 
 if __name__ == "__main__":
@@ -380,84 +563,46 @@ if __name__ == "__main__":
     ]
     pk_map = dict(pk_plan)
 
+    # Package environment variables for workers
+    env_vars = {
+        'DB_IP': DB_IP,
+        'DB_NAME_1': DB_NAME_1,
+        'DB_NAME_2': DB_NAME_2,
+        'DB_USERNAME': DB_USERNAME,
+        'DB_PASSWORD': DB_PASSWORD,
+        'RE_API_KEY': RE_API_KEY
+    }
+
+    # Determine number of worker processes (use up to 75% of available cores, minimum 1)
+    max_workers = max(1, int(cpu_count() * 0.75))
+    logging.info(f"Starting parallel processing with {max_workers} workers (detected {cpu_count()} cores)")
+
+    # Prepare arguments for each table
+    worker_args = []
+    for table_name, endpoint in data_to_download.items():
+        worker_args.append((table_name, endpoint, pk_map, TABLES_WITH_CASCADE, use_db_name_2, env_vars))
+
+    # Process tables in parallel
     table_dfs: Dict[str, pd.DataFrame] = {}
 
-    for table_name, endpoint in data_to_download.items():
-        logging.info(f"--- Processing {table_name} ---")
-        housekeeping()
-        try:
-            pagination_api_request(endpoint)
-            df = load_from_json_to_df()
-            if df.empty:
-                logging.info(f"No rows returned for {table_name}; ensuring table exists but is empty.")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_table = {executor.submit(process_table_worker, args): args[0] for args in worker_args}
 
-            date_cols = detect_date_columns(df)
-            if date_cols:
-                df = convert_date_columns(df, date_cols)
-            dtype_map = sqlalchemy_dtype_map_for_dates(date_cols)
-
+        # Process completed tasks as they finish
+        for future in as_completed(future_to_table):
+            table_name = future_to_table[future]
             try:
-                df.to_csv(f"Data Dumps/{table_name}.csv", index=False, quoting=1, lineterminator='\r\n')
+                result_table_name, df = future.result()
+                if df is not None:
+                    table_dfs[result_table_name] = df
+                    logging.info(f"Successfully completed processing {result_table_name} with {len(df)} rows")
+                else:
+                    logging.error(f"Failed to process {result_table_name}")
             except Exception as e:
-                logging.warning(f"Failed to export CSV for {table_name}: {e}")
+                logging.exception(f"Exception occurred while processing {table_name}: {e}")
 
-            # DB_NAME_1: truncate & append logic
-            with connect_db(DB_NAME_1) as conn1:
-                with conn1.begin():  # Manages the transaction block
-                    if table_exists(conn1, table_name):
-                        intended_pk = pk_map.get(table_name)
-
-                        # Check for and correct a wrongly defined primary key before proceeding
-                        existing_pk_col = get_primary_key_column(conn1, table_name)
-                        if existing_pk_col and intended_pk and existing_pk_col != intended_pk:
-                            logging.warning(f"Table '{table_name}' has an incorrect PK on '{existing_pk_col}'. "
-                                            f"Expected '{intended_pk}'. Dropping the incorrect constraint.")
-                            pk_constraint_name = get_primary_key_constraint_name(conn1, table_name)
-                            if pk_constraint_name:
-                                conn1.execute(text(
-                                    f'ALTER TABLE public."{table_name}" DROP CONSTRAINT IF EXISTS "{pk_constraint_name}";'))
-                                logging.info(f"Dropped incorrect PK constraint '{pk_constraint_name}'.")
-                            else:
-                                logging.error(
-                                    f"Could not find constraint name to drop PK on {table_name}, but an incorrect PK column was detected.")
-
-                        # Use the key from our plan for de-duplication
-                        if intended_pk:
-                            df = remove_duplicates_from_df(df, intended_pk)
-
-                        disable_foreign_keys(conn1, table_name)
-                        use_cascade = table_name in TABLES_WITH_CASCADE
-                        truncate_table(conn1, table_name, use_cascade=use_cascade)
-
-                        if not df.empty:
-                            df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
-                                      method="multi")
-
-                        enable_foreign_keys(conn1, table_name)
-                        logging.info(f"DB_NAME_1: Truncated and appended {len(df)} rows to {table_name}")
-                    else:
-                        df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
-                                  method="multi")
-                        logging.info(f"DB_NAME_1: Created new table {table_name} with {len(df)} rows")
-
-            # DB_NAME_2: historical append logic (only if DB_NAME_2 is configured)
-            if use_db_name_2:
-                with connect_db(DB_NAME_2) as conn2:
-                    with conn2.begin():  # Manages the transaction block
-                        df_hist = df.copy()
-                        if not df_hist.empty:
-                            df_hist['downloaded_on'] = pd.Timestamp.now(tz='UTC')
-                            hist_dtype_map = {**dtype_map, 'downloaded_on': DateTime(timezone=True)}
-                            df_hist.to_sql(table_name, con=conn2, if_exists='append', index=False, dtype=hist_dtype_map,
-                                           method="multi")
-                            logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
-            else:
-                logging.debug(f"Skipping DB_NAME_2 operations for {table_name} (not configured)")
-
-            table_dfs[table_name] = df
-
-        except Exception as e:
-            logging.exception(f"Top-level processing error for {table_name}: {e}")
+    logging.info(f"Parallel processing completed. Processed {len(table_dfs)} tables successfully.")
 
     # --- PHASE 1 & 2: Create PKs, FKs, and Indexes ---
     logging.info("--- Post-processing: Creating keys and indexes on DB_NAME_1 ---")
