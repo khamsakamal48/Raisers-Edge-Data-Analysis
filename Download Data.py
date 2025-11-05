@@ -147,9 +147,20 @@ def sqlalchemy_dtype_map_for_dates(date_cols: List[str]) -> Dict[str, DateTime]:
 
 
 def connect_db(dbname: str):
+    """
+    Create a database connection with optimized pool settings for parallel workers.
+    Each connection is disposed after use to prevent pool exhaustion.
+    """
     try:
-        engine = create_engine(f'postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_IP}:5432/{dbname}',
-                               pool_recycle=3600)
+        # Use smaller pool size for worker processes to prevent connection exhaustion
+        # pool_size=1 and max_overflow=0 means each engine uses at most 1 connection
+        engine = create_engine(
+            f'postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_IP}:5432/{dbname}',
+            pool_recycle=3600,
+            pool_size=1,
+            max_overflow=0,
+            pool_pre_ping=True  # Verify connections before using them
+        )
         conn = engine.connect()
         return conn
     except Exception as e:
@@ -467,7 +478,12 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
     DB_USERNAME = env_vars['DB_USERNAME']
     DB_PASSWORD = env_vars['DB_PASSWORD']
 
-    logging.info(f"Worker started loading {table_name} to database (DataFrame size: {len(df)} rows, {df.memory_usage(deep=True).sum() / 1024 / 1024:.2f} MB)")
+    logging.info(f"Worker started loading {table_name} to database")
+    logging.info(f"DataFrame size: {len(df)} rows, {len(df.columns)} columns")
+    logging.info(f"Memory usage: {df.memory_usage(deep=True).sum() / 1024 / 1024:.2f} MB")
+
+    # Create a copy of the dataframe to avoid any shared memory issues
+    df = df.copy()
 
     try:
         # Detect date columns for dtype mapping
@@ -476,7 +492,11 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
         dtype_map = {c: DateTime(timezone=True) for c in date_cols}
 
         # DB_NAME_1: truncate & append logic
-        with connect_db(DB_NAME_1) as conn1:
+        conn1 = None
+        engine1 = None
+        try:
+            conn1 = connect_db(DB_NAME_1)
+            engine1 = conn1.engine
             with conn1.begin():
                 if table_exists(conn1, table_name):
                     intended_pk = pk_map.get(table_name)
@@ -520,10 +540,21 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                     df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
                               method="multi")
                     logging.info(f"DB_NAME_1: Created new table {table_name} with {len(df)} rows")
+        finally:
+            # Properly close connection and dispose engine to free resources
+            if conn1:
+                conn1.close()
+            if engine1:
+                engine1.dispose()
+                logging.info(f"Disposed DB_NAME_1 engine for {table_name}")
 
         # DB_NAME_2: historical append logic
         if use_db_name_2:
-            with connect_db(DB_NAME_2) as conn2:
+            conn2 = None
+            engine2 = None
+            try:
+                conn2 = connect_db(DB_NAME_2)
+                engine2 = conn2.engine
                 with conn2.begin():
                     df_hist = df.copy()
                     if not df_hist.empty:
@@ -532,24 +563,40 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                         df_hist.to_sql(table_name, con=conn2, if_exists='append', index=False, dtype=hist_dtype_map,
                                        method="multi")
                         logging.info(f"DB_NAME_2: Appended {len(df_hist)} rows to {table_name}")
+            finally:
+                # Properly close connection and dispose engine to free resources
+                if conn2:
+                    conn2.close()
+                if engine2:
+                    engine2.dispose()
+                    logging.info(f"Disposed DB_NAME_2 engine for {table_name}")
 
-        logging.info(f"Worker completed loading {table_name}")
+        logging.info(f"Worker completed loading {table_name} successfully")
         return (table_name, True)
 
     except MemoryError as e:
         logging.exception(f"Worker ran out of memory loading {table_name}: {e}")
-        logging.error(f"Consider reducing max_workers or splitting {table_name} into smaller chunks")
+        logging.error(f"DataFrame size: {len(df)} rows, {df.memory_usage(deep=True).sum() / 1024 / 1024:.2f} MB")
+        logging.error(f"Consider reducing max_workers or processing {table_name} separately")
+        return (table_name, False)
+    except SQLAlchemyError as e:
+        logging.exception(f"Database error while loading {table_name}: {e}")
+        logging.error(f"Error type: {type(e).__name__}")
         return (table_name, False)
     except Exception as e:
-        logging.exception(f"Worker error loading {table_name}: {e}")
+        logging.exception(f"Unexpected error loading {table_name}: {e}")
+        logging.error(f"Error type: {type(e).__name__}")
+        logging.error(f"DataFrame shape: {df.shape}")
         return (table_name, False)
     finally:
         # Explicit cleanup to help with memory management
         try:
+            del df  # Explicitly delete the dataframe
             import gc
             gc.collect()
-        except:
-            pass
+            logging.info(f"Worker cleanup completed for {table_name}")
+        except Exception as cleanup_error:
+            logging.warning(f"Error during cleanup for {table_name}: {cleanup_error}")
 
 
 # ------------------------------- Main script -------------------------------
@@ -642,10 +689,10 @@ if __name__ == "__main__":
     logging.info(f"Sequential download completed. Downloaded {len([t for t, df in table_dfs.items() if not df.empty])} tables successfully.")
 
     # ============================================================================
-    # PHASE 2: Load all data to database IN PARALLEL
+    # PHASE 2: Load all data to database IN PARALLEL (with dependency management)
     # ============================================================================
     logging.info("=" * 80)
-    logging.info("PHASE 2: Starting parallel loading to database")
+    logging.info("PHASE 2: Starting parallel loading to database with dependency management")
     logging.info("=" * 80)
 
     # Determine number of worker processes (use up to 50% of available cores, minimum 1, max 8)
@@ -653,32 +700,93 @@ if __name__ == "__main__":
     max_workers = min(8, max(1, int(cpu_count() * 0.5)))
     logging.info(f"Starting parallel database loading with {max_workers} workers (detected {cpu_count()} cores)")
 
-    # Prepare arguments for each table to load
-    load_worker_args = []
-    for table_name, df in table_dfs.items():
-        if not df.empty:  # Only load non-empty DataFrames
-            load_worker_args.append((table_name, df, pk_map, TABLES_WITH_CASCADE, TABLES_SKIP_TRUNCATE, use_db_name_2, env_vars))
+    # Define table loading order in batches to respect FK dependencies
+    # Tables in the same batch can be loaded in parallel (no dependencies between them)
+    # Tables in later batches depend on tables in earlier batches
+    LOADING_BATCHES = [
+        # Batch 1: Independent parent tables
+        ['fund_list', 'campaign_list'],
+        # Batch 2: constituent_list (parent of many tables)
+        ['constituent_list'],
+        # Batch 3: Tables that depend on constituent_list
+        ['action_list', 'phone_list', 'school_list', 'email_list',
+         'online_presence_list', 'constituent_code_list', 'address_list',
+         'relationship_list', 'constituent_custom_fields'],
+        # Batch 4: gift_list (depends on constituent_list, fund_list, campaign_list)
+        ['gift_list'],
+        # Batch 5: gift_custom_fields (depends on gift_list)
+        ['gift_custom_fields'],
+    ]
 
-    # Load tables to database in parallel
+    # Load tables to database in batches
     load_results: Dict[str, bool] = {}
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all load tasks
-        future_to_table = {executor.submit(load_table_to_db_worker, args): args[0] for args in load_worker_args}
+    for batch_num, batch_tables in enumerate(LOADING_BATCHES, start=1):
+        logging.info(f"Loading batch {batch_num}/{len(LOADING_BATCHES)}: {', '.join(batch_tables)}")
 
-        # Process completed tasks as they finish
-        for future in as_completed(future_to_table):
-            table_name = future_to_table[future]
-            try:
-                result_table_name, success = future.result()
-                load_results[result_table_name] = success
-                if success:
-                    logging.info(f"Successfully loaded {result_table_name} to database")
-                else:
-                    logging.error(f"Failed to load {result_table_name} to database")
-            except Exception as e:
-                logging.exception(f"Exception occurred while loading {table_name}: {e}")
+        # Prepare arguments for tables in this batch
+        batch_worker_args = []
+        for table_name in batch_tables:
+            if table_name in table_dfs and not table_dfs[table_name].empty:
+                batch_worker_args.append((table_name, table_dfs[table_name], pk_map,
+                                         TABLES_WITH_CASCADE, TABLES_SKIP_TRUNCATE,
+                                         use_db_name_2, env_vars))
+            elif table_name in table_dfs:
+                logging.warning(f"Skipping {table_name} in batch {batch_num}: DataFrame is empty")
                 load_results[table_name] = False
+            else:
+                logging.warning(f"Skipping {table_name} in batch {batch_num}: not in downloaded tables")
+
+        if not batch_worker_args:
+            logging.info(f"No tables to load in batch {batch_num}, skipping")
+            continue
+
+        # Load tables in this batch in parallel
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all load tasks for this batch
+            future_to_table = {executor.submit(load_table_to_db_worker, args): args[0]
+                             for args in batch_worker_args}
+
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_table):
+                table_name = future_to_table[future]
+                try:
+                    result_table_name, success = future.result()
+                    load_results[result_table_name] = success
+                    if success:
+                        logging.info(f"Successfully loaded {result_table_name} to database")
+                    else:
+                        logging.error(f"Failed to load {result_table_name} to database")
+                except Exception as e:
+                    logging.exception(f"Exception occurred while loading {table_name}: {e}")
+                    load_results[table_name] = False
+
+        # Check if any critical tables failed in this batch
+        failed_in_batch = [t for t in batch_tables if load_results.get(t) == False]
+        if failed_in_batch:
+            logging.warning(f"Batch {batch_num} completed with failures: {', '.join(failed_in_batch)}")
+
+            # Check if critical parent tables failed - if so, warn about dependent tables
+            if batch_num == 1 and ('fund_list' in failed_in_batch or 'campaign_list' in failed_in_batch):
+                logging.warning("Critical parent tables failed in batch 1. gift_list may have FK issues.")
+            elif batch_num == 2 and 'constituent_list' in failed_in_batch:
+                logging.error("constituent_list failed in batch 2. Skipping all dependent tables in later batches.")
+                # Mark all dependent tables as failed and skip remaining batches
+                dependent_tables = ['action_list', 'phone_list', 'school_list', 'email_list',
+                                   'online_presence_list', 'constituent_code_list', 'address_list',
+                                   'relationship_list', 'constituent_custom_fields', 'gift_list',
+                                   'gift_custom_fields']
+                for dep_table in dependent_tables:
+                    load_results[dep_table] = False
+                logging.info(f"Marked {len(dependent_tables)} dependent tables as failed due to constituent_list failure")
+                break  # Exit the batch loading loop
+            elif batch_num == 4 and 'gift_list' in failed_in_batch:
+                logging.warning("gift_list failed in batch 4. Skipping gift_custom_fields in batch 5.")
+                load_results['gift_custom_fields'] = False
+        else:
+            logging.info(f"Batch {batch_num} completed successfully")
+
+        logging.info(f"Batch {batch_num} complete. Progress: {sum(1 for v in load_results.values() if v)}/{len(load_results)} tables loaded so far")
 
     successful_loads = sum(1 for success in load_results.values() if success)
     failed_loads = [table for table, success in load_results.items() if not success]
