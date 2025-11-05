@@ -146,16 +146,27 @@ def sqlalchemy_dtype_map_for_dates(date_cols: List[str]) -> Dict[str, DateTime]:
     return {c: DateTime(timezone=True) for c in date_cols}
 
 
-def connect_db(dbname: str):
+def connect_db(dbname: str, db_ip: str = None, db_username: str = None, db_password: str = None):
     """
     Create a database connection with optimized pool settings for parallel workers.
     Each connection is disposed after use to prevent pool exhaustion.
+
+    Args:
+        dbname: Database name to connect to
+        db_ip: Database IP (uses global DB_IP if not provided)
+        db_username: Database username (uses global DB_USERNAME if not provided)
+        db_password: Database password (uses global DB_PASSWORD if not provided)
     """
     try:
+        # Use provided parameters or fall back to global variables
+        _db_ip = db_ip if db_ip is not None else DB_IP
+        _db_username = db_username if db_username is not None else DB_USERNAME
+        _db_password = db_password if db_password is not None else DB_PASSWORD
+
         # Use smaller pool size for worker processes to prevent connection exhaustion
         # pool_size=1 and max_overflow=0 means each engine uses at most 1 connection
         engine = create_engine(
-            f'postgresql+psycopg2://{DB_USERNAME}:{DB_PASSWORD}@{DB_IP}:5432/{dbname}',
+            f'postgresql+psycopg2://{_db_username}:{_db_password}@{_db_ip}:5432/{dbname}',
             pool_recycle=3600,
             pool_size=1,
             max_overflow=0,
@@ -495,7 +506,7 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
         conn1 = None
         engine1 = None
         try:
-            conn1 = connect_db(DB_NAME_1)
+            conn1 = connect_db(DB_NAME_1, DB_IP, DB_USERNAME, DB_PASSWORD)
             engine1 = conn1.engine
             with conn1.begin():
                 if table_exists(conn1, table_name):
@@ -553,7 +564,7 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
             conn2 = None
             engine2 = None
             try:
-                conn2 = connect_db(DB_NAME_2)
+                conn2 = connect_db(DB_NAME_2, DB_IP, DB_USERNAME, DB_PASSWORD)
                 engine2 = conn2.engine
                 with conn2.begin():
                     df_hist = df.copy()
