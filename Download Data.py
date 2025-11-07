@@ -658,6 +658,8 @@ if __name__ == "__main__":
         'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
         'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts?limit=5000',
         'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields?limit=5000',
+        'notes': 'https://api.sky.blackbaud.com/constituent/v1/notes?limit=5000',
+        'opportunity_list': 'https://api.sky.blackbaud.com/opportunity/v1/opportunities?limit=5000',
     }
 
     pk_plan = [
@@ -666,6 +668,7 @@ if __name__ == "__main__":
         ('action_list', 'id'), ('address_list', 'id'), ('relationship_list', 'id'),
         ('email_list', 'id'), ('online_presence_list', 'id'), ('gift_custom_fields', 'id'),
         ('constituent_custom_fields', 'id'), ('constituent_code_list', 'id'),
+        ('notes', 'id'), ('opportunity_list', 'id')
     ]
     pk_map = dict(pk_plan)
 
@@ -722,9 +725,9 @@ if __name__ == "__main__":
         # Batch 3: Tables that depend on constituent_list
         ['action_list', 'phone_list', 'school_list', 'email_list',
          'online_presence_list', 'constituent_code_list', 'address_list',
-         'relationship_list', 'constituent_custom_fields'],
+         'relationship_list', 'constituent_custom_fields', 'notes'],
         # Batch 4: gift_list (depends on constituent_list, fund_list, campaign_list)
-        ['gift_list'],
+        ['gift_list', 'opportunity_list'],
         # Batch 5: gift_custom_fields (depends on gift_list)
         ['gift_custom_fields'],
     ]
@@ -786,7 +789,7 @@ if __name__ == "__main__":
                 dependent_tables = ['action_list', 'phone_list', 'school_list', 'email_list',
                                    'online_presence_list', 'constituent_code_list', 'address_list',
                                    'relationship_list', 'constituent_custom_fields', 'gift_list',
-                                   'gift_custom_fields']
+                                   'gift_custom_fields', 'notes', 'opportunity_list']
                 for dep_table in dependent_tables:
                     load_results[dep_table] = False
                 logging.info(f"Marked {len(dependent_tables)} dependent tables as failed due to constituent_list failure")
@@ -827,6 +830,10 @@ if __name__ == "__main__":
         ('gift_custom_fields', 'parent_id', 'gift_list', 'id'),
         ('gift_list', 'gift_splits_0_fund_id', 'fund_list', 'id'),
         ('gift_list', 'gift_splits_0_campaign_id', 'campaign_list', 'id'),
+        ('notes', 'constituent_id', 'constituent_list', 'id'),
+        ('opportunity_list', 'constituent_id', 'constituent_list', 'id'),
+        ('opportunity_list', 'fund_id', 'fund_list', 'id'),
+        ('opportunity_list', 'campaign_id', 'campaign_list', 'id')
     ]
 
     with connect_db(DB_NAME_1) as conn:
