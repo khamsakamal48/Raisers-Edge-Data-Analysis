@@ -3,6 +3,7 @@ import logging
 import json
 import sys
 import glob
+import time
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Manager, cpu_count
@@ -47,11 +48,17 @@ def set_api_request_strategy():
 
 
 def housekeeping():
+    """Clean up temporary JSON files and checkpoint files."""
     for f in glob.glob('*_RE_*.json'):
         try:
             os.remove(f)
         except OSError as e:
             logging.warning(f"Error removing file {f}: {e}")
+    for f in glob.glob('checkpoint_*.json'):
+        try:
+            os.remove(f)
+        except OSError as e:
+            logging.warning(f"Error removing checkpoint file {f}: {e}")
 
 
 def retrieve_token():
@@ -352,12 +359,110 @@ def create_fk_constraint(conn, src_table: str, src_col: str, tgt_table: str, tgt
         logging.exception(f"Failed to create FK {fk_name} on {src_table}: {e}")
 
 
+# ------------------------------- Checkpoint/State Management -------------------------------
+
+def load_checkpoint(table_name: str) -> Dict:
+    """
+    Load checkpoint state for a table download.
+    Returns dict with keys: last_page, last_url, is_complete, downloaded_pages (list)
+    """
+    checkpoint_file = f'checkpoint_{table_name}.json'
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+                logging.info(f"Loaded checkpoint for {table_name}: page {checkpoint.get('last_page', 0)}, "
+                           f"complete={checkpoint.get('is_complete', False)}")
+                return checkpoint
+        except Exception as e:
+            logging.warning(f"Failed to load checkpoint for {table_name}: {e}")
+    return {'last_page': 0, 'last_url': None, 'is_complete': False, 'downloaded_pages': []}
+
+
+def save_checkpoint(table_name: str, page_num: int, next_url: Optional[str], is_complete: bool, downloaded_pages: List[int]):
+    """
+    Save checkpoint state for a table download.
+    """
+    checkpoint = {
+        'last_page': page_num,
+        'last_url': next_url,
+        'is_complete': is_complete,
+        'downloaded_pages': downloaded_pages,
+        'timestamp': time.time()
+    }
+    checkpoint_file = f'checkpoint_{table_name}.json'
+    try:
+        with open(checkpoint_file, 'w') as f:
+            json.dump(checkpoint, f, indent=2)
+        logging.debug(f"Saved checkpoint for {table_name}: page {page_num}, complete={is_complete}")
+    except Exception as e:
+        logging.warning(f"Failed to save checkpoint for {table_name}: {e}")
+
+
+def clear_checkpoint(table_name: str):
+    """
+    Remove checkpoint file for a table after successful complete download.
+    """
+    checkpoint_file = f'checkpoint_{table_name}.json'
+    if os.path.exists(checkpoint_file):
+        try:
+            os.remove(checkpoint_file)
+            logging.info(f"Cleared checkpoint for {table_name}")
+        except Exception as e:
+            logging.warning(f"Failed to clear checkpoint for {table_name}: {e}")
+
+
+def retry_with_backoff(func, max_retries=5, initial_delay=1, max_delay=60, backoff_factor=2):
+    """
+    Retry a function with exponential backoff.
+
+    Args:
+        func: Function to retry (should be a lambda or callable)
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds
+        max_delay: Maximum delay in seconds
+        backoff_factor: Multiplier for delay after each retry
+
+    Returns:
+        Result of func() if successful
+
+    Raises:
+        Last exception if all retries fail
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                # Check if it's a permanent error (4xx except 429)
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                    if 400 <= status_code < 500 and status_code != 429:
+                        logging.error(f"Permanent error (status {status_code}), not retrying: {e}")
+                        raise
+
+                logging.warning(f"Request failed (attempt {attempt + 1}/{max_retries}): {e}")
+                logging.info(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                delay = min(delay * backoff_factor, max_delay)
+            else:
+                logging.error(f"All {max_retries} retry attempts failed")
+                raise
+
+    raise last_exception
+
+
 # ------------------------------- Download function (sequential) -------------------------------
 
 def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.DataFrame:
     """
-    Download data for a single table sequentially.
+    Download data for a single table sequentially with resume capability.
     Returns the DataFrame with the downloaded data.
+    Uses checkpoints to resume from network failures.
     """
     logging.info(f"Starting download for {table_name}")
 
@@ -368,51 +473,106 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
     process_name = f"download_{table_name}"
 
     try:
-        # Clean up any old JSON files for this table
-        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
-            try:
-                os.remove(f)
-            except OSError as e:
-                logging.warning(f"Error removing file {f}: {e}")
+        # Load checkpoint to check if we have an incomplete download
+        checkpoint = load_checkpoint(table_name)
 
-        # Paginate API and save to JSON files
-        logging.info(f"Downloading data for {table_name}")
-        token = retrieve_token()
-        if not token:
-            logging.critical(f"Failed to retrieve API token for {table_name}")
-            return pd.DataFrame()
+        # If we have a complete download, check if the files still exist
+        if checkpoint['is_complete']:
+            existing_files = glob.glob(f'API_Response_RE_{process_name}_*.json')
+            if existing_files:
+                logging.info(f"Found complete checkpoint for {table_name} with existing files, loading data")
+                # Skip download, just load the existing files
+            else:
+                logging.warning(f"Checkpoint says complete but files missing, restarting download for {table_name}")
+                checkpoint = {'last_page': 0, 'last_url': None, 'is_complete': False, 'downloaded_pages': []}
+                clear_checkpoint(table_name)
 
-        headers = {
-            'Bb-Api-Subscription-Key': re_api_key,
-            'Authorization': 'Bearer ' + token
-        }
+        if not checkpoint['is_complete']:
+            # Need to download (either fresh start or resume)
+            if checkpoint['last_page'] > 0:
+                logging.info(f"Resuming download for {table_name} from page {checkpoint['last_page'] + 1}")
+                # Keep existing files, we'll continue from where we left off
+                url = checkpoint['last_url']
+                page_num = checkpoint['last_page'] + 1
+            else:
+                logging.info(f"Starting fresh download for {table_name}")
+                # Clean up any old JSON files for this table
+                for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
+                    try:
+                        os.remove(f)
+                    except OSError as e:
+                        logging.warning(f"Error removing file {f}: {e}")
+                url = endpoint
+                page_num = 1
 
-        url = endpoint
-        page_num = 1
-        while url:
-            try:
-                response = http.get(url, params={}, headers=headers)
-                response.raise_for_status()
-                resp = response.json()
+            # Paginate API and save to JSON files
+            token = retrieve_token()
+            if not token:
+                logging.critical(f"Failed to retrieve API token for {table_name}")
+                return pd.DataFrame()
 
-                file_path = f'API_Response_RE_{process_name}_{page_num}.json'
-                with open(file_path, 'w', encoding='utf-8') as fh:
-                    json.dump(resp, fh, ensure_ascii=False, indent=2)
+            headers = {
+                'Bb-Api-Subscription-Key': re_api_key,
+                'Authorization': 'Bearer ' + token
+            }
 
-                next_link = resp.get('next_link') or resp.get('next')
-                if next_link:
-                    url = next_link
-                    page_num += 1
-                else:
-                    break
-            except requests.exceptions.RequestException as e:
-                logging.error(f"API request failed for {table_name} at {url}: {e}")
-                break
+            downloaded_pages = checkpoint.get('downloaded_pages', [])
+
+            while url:
+                try:
+                    # Use retry logic with exponential backoff
+                    def make_request():
+                        response = http.get(url, params={}, headers=headers)
+                        response.raise_for_status()
+                        return response.json()
+
+                    logging.info(f"Downloading {table_name} page {page_num}")
+                    resp = retry_with_backoff(make_request, max_retries=5, initial_delay=2, max_delay=60)
+
+                    # Save the page immediately
+                    file_path = f'API_Response_RE_{process_name}_{page_num}.json'
+                    with open(file_path, 'w', encoding='utf-8') as fh:
+                        json.dump(resp, fh, ensure_ascii=False, indent=2)
+
+                    downloaded_pages.append(page_num)
+                    logging.info(f"Successfully saved {table_name} page {page_num}")
+
+                    # Check for next page
+                    next_link = resp.get('next_link') or resp.get('next')
+
+                    if next_link:
+                        # More pages to download - save checkpoint
+                        save_checkpoint(table_name, page_num, next_link, False, downloaded_pages)
+                        url = next_link
+                        page_num += 1
+                    else:
+                        # No more pages - download complete!
+                        logging.info(f"Download complete for {table_name} - reached end at page {page_num}")
+                        save_checkpoint(table_name, page_num, None, True, downloaded_pages)
+                        break
+
+                except requests.exceptions.RequestException as e:
+                    logging.error(f"API request failed for {table_name} at page {page_num}: {e}")
+                    logging.error(f"Download incomplete. You can resume by running the script again.")
+                    logging.error(f"Progress saved: {len(downloaded_pages)} pages downloaded")
+                    # Save checkpoint before exiting
+                    save_checkpoint(table_name, page_num - 1, url, False, downloaded_pages)
+                    return pd.DataFrame()  # Return empty to signal failure
+                except Exception as e:
+                    logging.exception(f"Unexpected error downloading {table_name} at page {page_num}: {e}")
+                    # Save checkpoint before exiting
+                    save_checkpoint(table_name, page_num - 1, url, False, downloaded_pages)
+                    return pd.DataFrame()
 
         # Load JSON files into DataFrame
         file_list = glob.glob(f'API_Response_RE_{process_name}_*.json')
+        if not file_list:
+            logging.error(f"No data files found for {table_name}")
+            return pd.DataFrame()
+
+        logging.info(f"Loading {len(file_list)} pages for {table_name}")
         all_dfs = []
-        for each_file in file_list:
+        for each_file in sorted(file_list):  # Sort to maintain order
             with open(each_file, 'r', encoding='utf-8') as fh:
                 content = json.load(fh)
 
@@ -448,12 +608,15 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
         except Exception as e:
             logging.warning(f"Failed to export CSV for {table_name}: {e}")
 
-        # Clean up JSON files
-        for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
-            try:
-                os.remove(f)
-            except OSError as e:
-                logging.warning(f"Error removing file {f}: {e}")
+        # Clean up JSON files and checkpoint only if download was complete
+        if checkpoint['is_complete'] or load_checkpoint(table_name)['is_complete']:
+            for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
+                try:
+                    os.remove(f)
+                except OSError as e:
+                    logging.warning(f"Error removing file {f}: {e}")
+            clear_checkpoint(table_name)
+            logging.info(f"Cleaned up temporary files and checkpoint for {table_name}")
 
         logging.info(f"Download completed for {table_name} with {len(df)} rows")
         return df
@@ -689,18 +852,39 @@ if __name__ == "__main__":
     logging.info("=" * 80)
 
     table_dfs: Dict[str, pd.DataFrame] = {}
+    incomplete_downloads = []
 
     for table_name, endpoint in data_to_download.items():
         logging.info(f"Downloading table: {table_name}")
         df = download_table_data(table_name, endpoint, RE_API_KEY)
-        if not df.empty:
+
+        # Validate that the download completed successfully
+        checkpoint = load_checkpoint(table_name)
+
+        if not df.empty and checkpoint.get('is_complete', False):
             table_dfs[table_name] = df
-            logging.info(f"Successfully downloaded {table_name} with {len(df)} rows")
+            logging.info(f"Successfully downloaded {table_name} with {len(df)} rows - COMPLETE")
+        elif not df.empty and not checkpoint.get('is_complete', False):
+            logging.error(f"Downloaded {table_name} but download is INCOMPLETE - will not load to database")
+            logging.error(f"Run the script again to resume the incomplete download for {table_name}")
+            incomplete_downloads.append(table_name)
+            table_dfs[table_name] = pd.DataFrame()  # Store empty to signal failure
         else:
             logging.warning(f"Downloaded empty or failed to download {table_name}")
+            incomplete_downloads.append(table_name)
             table_dfs[table_name] = df  # Store empty DataFrame to track attempt
 
-    logging.info(f"Sequential download completed. Downloaded {len([t for t, df in table_dfs.items() if not df.empty])} tables successfully.")
+    successful_count = len([t for t, df in table_dfs.items() if not df.empty])
+    logging.info(f"Sequential download completed. Downloaded {successful_count}/{len(data_to_download)} tables successfully.")
+
+    if incomplete_downloads:
+        logging.warning("=" * 80)
+        logging.warning(f"INCOMPLETE DOWNLOADS DETECTED: {len(incomplete_downloads)} tables")
+        logging.warning(f"Tables with incomplete downloads: {', '.join(incomplete_downloads)}")
+        logging.warning("These tables will NOT be loaded to the database.")
+        logging.warning("To resume incomplete downloads, run this script again.")
+        logging.warning("The script will automatically resume from where it left off.")
+        logging.warning("=" * 80)
 
     # ============================================================================
     # PHASE 2: Load all data to database IN PARALLEL (with dependency management)
