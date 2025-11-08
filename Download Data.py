@@ -325,6 +325,55 @@ def fk_constraint_exists(conn, table_name: str, constraint_name: str) -> bool:
         return False
 
 
+def get_table_columns(conn, table_name: str) -> set:
+    """Get set of column names from an existing table."""
+    q = text("""
+             SELECT column_name
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = :table;
+             """)
+    try:
+        result = conn.execute(q, {"table": table_name})
+        return {row[0] for row in result}
+    except SQLAlchemyError as e:
+        logging.error(f"Failed to get columns for {table_name}: {e}")
+        return set()
+
+
+def schema_changed(conn, table_name: str, df: pd.DataFrame) -> bool:
+    """Check if DataFrame columns differ from existing table schema."""
+    if not table_exists(conn, table_name):
+        return False  # No schema to compare, table doesn't exist
+
+    existing_cols = get_table_columns(conn, table_name)
+    df_cols = set(df.columns)
+
+    # Schema changed if columns are different
+    changed = existing_cols != df_cols
+
+    if changed:
+        added = df_cols - existing_cols
+        removed = existing_cols - df_cols
+        logging.info(f"Schema change detected for {table_name}:")
+        if added:
+            logging.info(f"  New columns: {sorted(added)}")
+        if removed:
+            logging.info(f"  Removed columns: {sorted(removed)}")
+
+    return changed
+
+
+def drop_table_cascade(conn, table_name: str):
+    """Drop table with CASCADE to handle dependent objects."""
+    try:
+        conn.execute(text(f'DROP TABLE IF EXISTS public."{table_name}" CASCADE;'))
+        logging.info(f"Dropped table {table_name} with CASCADE")
+    except SQLAlchemyError as e:
+        logging.error(f"Failed to drop table {table_name}: {e}")
+        raise
+
+
 def create_fk_constraint(conn, src_table: str, src_col: str, tgt_table: str, tgt_col: str,
                          src_values: Optional[pd.Series] = None, tgt_values: Optional[pd.Series] = None):
     fk_name = f"fk_{src_table}_{src_col}"
@@ -668,7 +717,7 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                      and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
         dtype_map = {c: DateTime(timezone=True) for c in date_cols}
 
-        # DB_NAME_1: Replace table logic (handles schema changes automatically)
+        # DB_NAME_1: Smart table loading with schema change detection
         conn1 = None
         engine1 = None
         try:
@@ -680,16 +729,31 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                 if intended_pk:
                     df = remove_duplicates_from_df(df, intended_pk)
 
-                # Use 'replace' to handle schema changes automatically
-                # This drops and recreates the table with the correct schema
                 if not df.empty:
-                    df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
-                              method="multi")
-                    logging.info(f"DB_NAME_1: Replaced {table_name} with {len(df)} rows")
+                    # Check if table exists and if schema changed
+                    if table_exists(conn1, table_name):
+                        if schema_changed(conn1, table_name, df):
+                            # Schema changed - drop and recreate with CASCADE
+                            logging.warning(f"{table_name} schema changed - will drop and recreate with CASCADE")
+                            drop_table_cascade(conn1, table_name)
+                            df.to_sql(table_name, con=conn1, if_exists='fail', index=False, dtype=dtype_map,
+                                      method="multi")
+                            logging.info(f"DB_NAME_1: Recreated {table_name} with new schema ({len(df)} rows)")
+                        else:
+                            # Schema same - truncate and append (faster, preserves FK structure)
+                            truncate_table(conn1, table_name, use_cascade=False)
+                            df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
+                                      method="multi")
+                            logging.info(f"DB_NAME_1: Truncated and loaded {table_name} ({len(df)} rows)")
+                    else:
+                        # Table doesn't exist - create new
+                        df.to_sql(table_name, con=conn1, if_exists='fail', index=False, dtype=dtype_map,
+                                  method="multi")
+                        logging.info(f"DB_NAME_1: Created new table {table_name} ({len(df)} rows)")
                 else:
-                    # For empty DataFrames, only replace if table doesn't exist
+                    # Empty DataFrame
                     if not table_exists(conn1, table_name):
-                        df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
+                        df.to_sql(table_name, con=conn1, if_exists='fail', index=False, dtype=dtype_map,
                                   method="multi")
                         logging.info(f"DB_NAME_1: Created empty table {table_name}")
                     else:
