@@ -131,7 +131,7 @@ def load_from_json_to_df():
 
     df = pd.concat(all_dfs, ignore_index=True)
 
-    id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id', 'campaign_id')]
+    id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id',)]
     for col in id_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
@@ -341,6 +341,34 @@ def get_table_columns(conn, table_name: str) -> set:
         return set()
 
 
+def get_column_data_type(conn, table_name: str, column_name: str) -> Optional[str]:
+    """Get the data type of a specific column in a table."""
+    q = text("""
+             SELECT data_type
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = :table
+               AND column_name = :column;
+             """)
+    try:
+        result = conn.execute(q, {"table": table_name, "column": column_name}).scalar()
+        return result
+    except SQLAlchemyError:
+        return None
+
+
+def has_type_mismatch(conn, table_name: str, df: pd.DataFrame) -> bool:
+    """Check if campaign_id column has wrong data type (double precision instead of bigint)."""
+    if 'campaign_id' not in df.columns:
+        return False
+
+    col_type = get_column_data_type(conn, table_name, 'campaign_id')
+    if col_type == 'double precision':
+        logging.warning(f"Data type mismatch detected: {table_name}.campaign_id is 'double precision' but should be 'bigint'")
+        return True
+    return False
+
+
 def schema_changed(conn, table_name: str, df: pd.DataFrame) -> bool:
     """Check if DataFrame columns differ from existing table schema."""
     if not table_exists(conn, table_name):
@@ -361,6 +389,11 @@ def schema_changed(conn, table_name: str, df: pd.DataFrame) -> bool:
         if removed:
             logging.info(f"  Removed columns: {sorted(removed)}")
 
+    # Also check for data type mismatches
+    if not changed and has_type_mismatch(conn, table_name, df):
+        logging.info(f"Schema change detected for {table_name}: data type mismatch")
+        changed = True
+
     return changed
 
 
@@ -372,6 +405,24 @@ def drop_table_cascade(conn, table_name: str):
     except SQLAlchemyError as e:
         logging.error(f"Failed to drop table {table_name}: {e}")
         raise
+
+
+def table_has_foreign_key_references(conn, table_name: str) -> bool:
+    """Check if other tables reference this table via foreign keys."""
+    q = text("""
+             SELECT 1
+             FROM information_schema.table_constraints tc
+             JOIN information_schema.constraint_column_usage ccu
+                 ON tc.constraint_name = ccu.constraint_name
+             WHERE tc.constraint_type = 'FOREIGN KEY'
+               AND ccu.table_schema = 'public'
+               AND ccu.table_name = :table
+             LIMIT 1;
+             """)
+    try:
+        return conn.execute(q, {"table": table_name}).scalar() is not None
+    except SQLAlchemyError:
+        return False
 
 
 def create_fk_constraint(conn, src_table: str, src_col: str, tgt_table: str, tgt_col: str,
@@ -503,6 +554,43 @@ def retry_with_backoff(func, max_retries=5, initial_delay=1, max_delay=60, backo
                 raise
 
     raise last_exception
+
+
+# ------------------------------- CSV loading function (for DEBUG mode) -------------------------------
+
+def load_table_from_csv(table_name: str) -> Tuple[pd.DataFrame, bool]:
+    """
+    Load data from CSV file instead of API (for DEBUG mode).
+    Returns tuple of (DataFrame, is_complete).
+    """
+    csv_path = f"Data Dumps/{table_name}.csv"
+
+    if not os.path.exists(csv_path):
+        logging.warning(f"CSV file not found for {table_name}: {csv_path}")
+        return pd.DataFrame(), False
+
+    try:
+        logging.info(f"Loading {table_name} from CSV: {csv_path}")
+        df = pd.read_csv(csv_path, low_memory=False)
+
+        # Apply same transformations as download function
+        id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id',)]
+        for col in id_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+
+        # Convert date columns
+        date_cols = [c for c in df.columns if 'date' in c.lower() and 'birth' not in c.lower()
+                     and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
+        if date_cols:
+            for c in date_cols:
+                df[c] = pd.to_datetime(df[c], utc=True, errors='coerce')
+
+        logging.info(f"Loaded {table_name} from CSV with {len(df)} rows")
+        return df, True
+
+    except Exception as e:
+        logging.exception(f"Error loading {table_name} from CSV: {e}")
+        return pd.DataFrame(), False
 
 
 # ------------------------------- Download function (sequential) -------------------------------
@@ -642,7 +730,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> Tupl
         else:
             df = pd.concat(all_dfs, ignore_index=True)
 
-            id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id', 'campaign_id')]
+            id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id',)]
             for col in id_cols:
                 df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
 
@@ -740,11 +828,20 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                                       method="multi")
                             logging.info(f"DB_NAME_1: Recreated {table_name} with new schema ({len(df)} rows)")
                         else:
-                            # Schema same - truncate and append (faster, preserves FK structure)
-                            truncate_table(conn1, table_name, use_cascade=False)
-                            df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
-                                      method="multi")
-                            logging.info(f"DB_NAME_1: Truncated and loaded {table_name} ({len(df)} rows)")
+                            # Schema same - truncate and append
+                            # Disable FK constraints to allow orphaned records
+                            try:
+                                disable_foreign_keys(conn1, table_name)
+
+                                # Use CASCADE if table is referenced by foreign keys
+                                use_cascade = table_has_foreign_key_references(conn1, table_name)
+                                truncate_table(conn1, table_name, use_cascade=use_cascade)
+                                df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
+                                          method="multi")
+                                logging.info(f"DB_NAME_1: Truncated and loaded {table_name} ({len(df)} rows)")
+                            finally:
+                                # Always re-enable FK constraints
+                                enable_foreign_keys(conn1, table_name)
                     else:
                         # Table doesn't exist - create new
                         df.to_sql(table_name, con=conn1, if_exists='fail', index=False, dtype=dtype_map,
@@ -831,6 +928,16 @@ if __name__ == "__main__":
     DB_PASSWORD = quote_plus(os.getenv("DB_PASSWORD", ""))
     RE_API_KEY = os.getenv("RE_API_KEY")
 
+    # Check for DEBUG mode - if enabled, load from CSVs instead of API
+    DEBUG_MODE = os.getenv("DEBUG", "").upper() in ("TRUE", "1", "YES", "ON")
+    if DEBUG_MODE:
+        logging.info("=" * 80)
+        logging.info("DEBUG MODE ENABLED - Will load data from CSV files in 'Data Dumps' folder")
+        logging.info("Set DEBUG=OFF or remove DEBUG variable to download from API")
+        logging.info("=" * 80)
+    else:
+        logging.info("DEBUG MODE DISABLED - Will download data from API")
+
     # Check if DB_NAME_2 is available and not blank
     use_db_name_2 = DB_NAME_2 and DB_NAME_2.strip()
     if not use_db_name_2:
@@ -889,35 +996,49 @@ if __name__ == "__main__":
     }
 
     # ============================================================================
-    # PHASE 1: Download all data SEQUENTIALLY
+    # PHASE 1: Download/Load all data SEQUENTIALLY
     # ============================================================================
     logging.info("=" * 80)
-    logging.info("PHASE 1: Starting sequential download of all tables")
+    if DEBUG_MODE:
+        logging.info("PHASE 1: Loading data from CSV files")
+    else:
+        logging.info("PHASE 1: Starting sequential download of all tables")
     logging.info("=" * 80)
 
     table_dfs: Dict[str, pd.DataFrame] = {}
     incomplete_downloads = []
 
     for table_name, endpoint in data_to_download.items():
-        logging.info(f"Downloading table: {table_name}")
-        df, is_complete = download_table_data(table_name, endpoint, RE_API_KEY)
+        if DEBUG_MODE:
+            # DEBUG mode - load from CSV
+            logging.info(f"Loading table from CSV: {table_name}")
+            df, is_complete = load_table_from_csv(table_name)
+        else:
+            # Normal mode - download from API
+            logging.info(f"Downloading table: {table_name}")
+            df, is_complete = download_table_data(table_name, endpoint, RE_API_KEY)
 
-        # Validate that the download completed successfully
+        # Validate that the download/load completed successfully
         if not df.empty and is_complete:
             table_dfs[table_name] = df
-            logging.info(f"Successfully downloaded {table_name} with {len(df)} rows - COMPLETE")
+            source = "CSV" if DEBUG_MODE else "API"
+            logging.info(f"Successfully loaded {table_name} from {source} with {len(df)} rows - COMPLETE")
         elif not df.empty and not is_complete:
-            logging.error(f"Downloaded {table_name} but download is INCOMPLETE - will not load to database")
-            logging.error(f"Run the script again to resume the incomplete download for {table_name}")
+            source = "CSV" if DEBUG_MODE else "download"
+            logging.error(f"Loaded {table_name} from {source} but marked INCOMPLETE - will not load to database")
+            if not DEBUG_MODE:
+                logging.error(f"Run the script again to resume the incomplete download for {table_name}")
             incomplete_downloads.append(table_name)
             table_dfs[table_name] = pd.DataFrame()  # Store empty to signal failure
         else:
-            logging.warning(f"Downloaded empty or failed to download {table_name}")
+            source = "CSV" if DEBUG_MODE else "API"
+            logging.warning(f"Empty or failed to load {table_name} from {source}")
             incomplete_downloads.append(table_name)
             table_dfs[table_name] = df  # Store empty DataFrame to track attempt
 
     successful_count = len([t for t, df in table_dfs.items() if not df.empty])
-    logging.info(f"Sequential download completed. Downloaded {successful_count}/{len(data_to_download)} tables successfully.")
+    source = "CSV files" if DEBUG_MODE else "API"
+    logging.info(f"Data loading completed. Loaded {successful_count}/{len(data_to_download)} tables successfully from {source}.")
 
     if incomplete_downloads:
         logging.warning("=" * 80)
