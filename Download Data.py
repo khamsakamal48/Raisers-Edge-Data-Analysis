@@ -458,10 +458,10 @@ def retry_with_backoff(func, max_retries=5, initial_delay=1, max_delay=60, backo
 
 # ------------------------------- Download function (sequential) -------------------------------
 
-def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.DataFrame:
+def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> Tuple[pd.DataFrame, bool]:
     """
     Download data for a single table sequentially with resume capability.
-    Returns the DataFrame with the downloaded data.
+    Returns tuple of (DataFrame, is_complete) where is_complete indicates successful download.
     Uses checkpoints to resume from network failures.
     """
     logging.info(f"Starting download for {table_name}")
@@ -471,6 +471,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
 
     # Create a unique process name for this download
     process_name = f"download_{table_name}"
+    download_complete = False  # Track if download completed successfully
 
     try:
         # Load checkpoint to check if we have an incomplete download
@@ -481,6 +482,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
             existing_files = glob.glob(f'API_Response_RE_{process_name}_*.json')
             if existing_files:
                 logging.info(f"Found complete checkpoint for {table_name} with existing files, loading data")
+                download_complete = True  # Mark as complete since we have checkpoint
                 # Skip download, just load the existing files
             else:
                 logging.warning(f"Checkpoint says complete but files missing, restarting download for {table_name}")
@@ -509,7 +511,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
             token = retrieve_token()
             if not token:
                 logging.critical(f"Failed to retrieve API token for {table_name}")
-                return pd.DataFrame()
+                return pd.DataFrame(), False
 
             headers = {
                 'Bb-Api-Subscription-Key': re_api_key,
@@ -549,6 +551,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
                         # No more pages - download complete!
                         logging.info(f"Download complete for {table_name} - reached end at page {page_num}")
                         save_checkpoint(table_name, page_num, None, True, downloaded_pages)
+                        download_complete = True  # Mark as complete
                         break
 
                 except requests.exceptions.RequestException as e:
@@ -557,18 +560,18 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
                     logging.error(f"Progress saved: {len(downloaded_pages)} pages downloaded")
                     # Save checkpoint before exiting
                     save_checkpoint(table_name, page_num - 1, url, False, downloaded_pages)
-                    return pd.DataFrame()  # Return empty to signal failure
+                    return pd.DataFrame(), False  # Return empty to signal failure
                 except Exception as e:
                     logging.exception(f"Unexpected error downloading {table_name} at page {page_num}: {e}")
                     # Save checkpoint before exiting
                     save_checkpoint(table_name, page_num - 1, url, False, downloaded_pages)
-                    return pd.DataFrame()
+                    return pd.DataFrame(), False
 
         # Load JSON files into DataFrame
         file_list = glob.glob(f'API_Response_RE_{process_name}_*.json')
         if not file_list:
             logging.error(f"No data files found for {table_name}")
-            return pd.DataFrame()
+            return pd.DataFrame(), False
 
         logging.info(f"Loading {len(file_list)} pages for {table_name}")
         all_dfs = []
@@ -609,7 +612,7 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
             logging.warning(f"Failed to export CSV for {table_name}: {e}")
 
         # Clean up JSON files and checkpoint only if download was complete
-        if checkpoint['is_complete'] or load_checkpoint(table_name)['is_complete']:
+        if download_complete:
             for f in glob.glob(f'API_Response_RE_{process_name}_*.json'):
                 try:
                     os.remove(f)
@@ -619,11 +622,11 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> pd.D
             logging.info(f"Cleaned up temporary files and checkpoint for {table_name}")
 
         logging.info(f"Download completed for {table_name} with {len(df)} rows")
-        return df
+        return df, download_complete
 
     except Exception as e:
         logging.exception(f"Error downloading {table_name}: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), False
 
 
 # ------------------------------- Worker function for parallel database loading -------------------------------
@@ -665,55 +668,32 @@ def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
                      and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
         dtype_map = {c: DateTime(timezone=True) for c in date_cols}
 
-        # DB_NAME_1: truncate & append logic
+        # DB_NAME_1: Replace table logic (handles schema changes automatically)
         conn1 = None
         engine1 = None
         try:
             conn1 = connect_db(DB_NAME_1, DB_IP, DB_USERNAME, DB_PASSWORD)
             engine1 = conn1.engine
             with conn1.begin():
-                if table_exists(conn1, table_name):
-                    intended_pk = pk_map.get(table_name)
+                # Remove duplicates before loading
+                intended_pk = pk_map.get(table_name)
+                if intended_pk:
+                    df = remove_duplicates_from_df(df, intended_pk)
 
-                    # Check for and correct a wrongly defined primary key
-                    existing_pk_col = get_primary_key_column(conn1, table_name)
-                    if existing_pk_col and intended_pk and existing_pk_col != intended_pk:
-                        logging.warning(f"Table '{table_name}' has an incorrect PK on '{existing_pk_col}'. "
-                                        f"Expected '{intended_pk}'. Dropping the incorrect constraint.")
-                        pk_constraint_name = get_primary_key_constraint_name(conn1, table_name)
-                        if pk_constraint_name:
-                            conn1.execute(text(
-                                f'ALTER TABLE public."{table_name}" DROP CONSTRAINT IF EXISTS "{pk_constraint_name}";'))
-                            logging.info(f"Dropped incorrect PK constraint '{pk_constraint_name}'.")
-
-                    # Remove duplicates
-                    if intended_pk:
-                        df = remove_duplicates_from_df(df, intended_pk)
-
-                    # Disable foreign keys and ensure they're re-enabled even on error
-                    try:
-                        disable_foreign_keys(conn1, table_name)
-
-                        # Skip truncation if this table will be truncated by a parent's CASCADE
-                        # This prevents lock contention during parallel loading
-                        if table_name not in tables_skip_truncate:
-                            use_cascade = table_name in tables_with_cascade
-                            truncate_table(conn1, table_name, use_cascade=use_cascade)
-                        else:
-                            logging.info(f"Skipping truncate for {table_name} (will be cascaded by parent table)")
-
-                        if not df.empty:
-                            df.to_sql(table_name, con=conn1, if_exists='append', index=False, dtype=dtype_map,
-                                      method="multi")
-                    finally:
-                        # Always re-enable foreign keys, even if an error occurred
-                        enable_foreign_keys(conn1, table_name)
-
-                    logging.info(f"DB_NAME_1: Truncated and appended {len(df)} rows to {table_name}")
-                else:
+                # Use 'replace' to handle schema changes automatically
+                # This drops and recreates the table with the correct schema
+                if not df.empty:
                     df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
                               method="multi")
-                    logging.info(f"DB_NAME_1: Created new table {table_name} with {len(df)} rows")
+                    logging.info(f"DB_NAME_1: Replaced {table_name} with {len(df)} rows")
+                else:
+                    # For empty DataFrames, only replace if table doesn't exist
+                    if not table_exists(conn1, table_name):
+                        df.to_sql(table_name, con=conn1, if_exists='replace', index=False, dtype=dtype_map,
+                                  method="multi")
+                        logging.info(f"DB_NAME_1: Created empty table {table_name}")
+                    else:
+                        logging.warning(f"DB_NAME_1: Skipping empty DataFrame for existing table {table_name}")
         finally:
             # Properly close connection and dispose engine to free resources
             if conn1:
@@ -856,15 +836,13 @@ if __name__ == "__main__":
 
     for table_name, endpoint in data_to_download.items():
         logging.info(f"Downloading table: {table_name}")
-        df = download_table_data(table_name, endpoint, RE_API_KEY)
+        df, is_complete = download_table_data(table_name, endpoint, RE_API_KEY)
 
         # Validate that the download completed successfully
-        checkpoint = load_checkpoint(table_name)
-
-        if not df.empty and checkpoint.get('is_complete', False):
+        if not df.empty and is_complete:
             table_dfs[table_name] = df
             logging.info(f"Successfully downloaded {table_name} with {len(df)} rows - COMPLETE")
-        elif not df.empty and not checkpoint.get('is_complete', False):
+        elif not df.empty and not is_complete:
             logging.error(f"Downloaded {table_name} but download is INCOMPLETE - will not load to database")
             logging.error(f"Run the script again to resume the incomplete download for {table_name}")
             incomplete_downloads.append(table_name)
