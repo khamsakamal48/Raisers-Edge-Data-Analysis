@@ -766,139 +766,6 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> Tupl
         return pd.DataFrame(), False
 
 
-def download_alias_data_for_all_constituents(re_api_key: str, db_name: str, db_ip: str = None,
-                                             db_username: str = None, db_password: str = None) -> pd.DataFrame:
-    """
-    Download alias data for all constituents by querying the database for constituent IDs
-    and making individual API requests for each constituent's aliases.
-
-    Returns a DataFrame with all aliases combined.
-    """
-    logging.info("=" * 80)
-    logging.info("Starting alias data download for all constituents")
-    logging.info("=" * 80)
-
-    try:
-        # Connect to database to get constituent IDs
-        conn = connect_db(db_name, db_ip, db_username, db_password)
-
-        try:
-            # Query all constituent IDs from the database
-            logging.info("Querying constituent IDs from database")
-            query = text("SELECT id FROM public.constituent_list ORDER BY id;")
-            result = conn.execute(query)
-            constituent_ids = [row[0] for row in result]
-            logging.info(f"Found {len(constituent_ids)} constituents to process")
-
-            if not constituent_ids:
-                logging.warning("No constituent IDs found in database")
-                return pd.DataFrame()
-
-        finally:
-            conn.close()
-            conn.engine.dispose()
-
-        # Set up HTTP session with retry strategy
-        http = set_api_request_strategy()
-
-        # Get API token
-        token = retrieve_token()
-        if not token:
-            logging.critical("Failed to retrieve API token for alias download")
-            return pd.DataFrame()
-
-        headers = {
-            'Bb-Api-Subscription-Key': re_api_key,
-            'Authorization': 'Bearer ' + token
-        }
-
-        # Collect all alias records
-        all_aliases = []
-        processed_count = 0
-        skipped_count = 0
-        error_count = 0
-
-        # Process each constituent
-        for constituent_id in constituent_ids:
-            try:
-                # Construct URL for this constituent's aliases
-                url = f'https://api.sky.blackbaud.com/constituent/v1/constituents/{constituent_id}/aliases'
-
-                # Make API request with retry logic
-                def make_request():
-                    response = http.get(url, params={}, headers=headers)
-                    response.raise_for_status()
-                    return response.json()
-
-                resp = retry_with_backoff(make_request, max_retries=5, initial_delay=2, max_delay=60)
-
-                # Check if there are any aliases
-                count = resp.get('count', 0)
-
-                if count > 0:
-                    # Extract alias records from the 'value' field
-                    aliases = resp.get('value', [])
-                    if aliases:
-                        all_aliases.extend(aliases)
-                        processed_count += 1
-                        if processed_count % 100 == 0:
-                            logging.info(f"Processed {processed_count} constituents with aliases (total aliases: {len(all_aliases)})")
-                    else:
-                        skipped_count += 1
-                else:
-                    skipped_count += 1
-
-            except requests.exceptions.RequestException as e:
-                logging.error(f"API request failed for constituent {constituent_id}: {e}")
-                error_count += 1
-                # Continue with next constituent
-                continue
-            except Exception as e:
-                logging.exception(f"Unexpected error processing constituent {constituent_id}: {e}")
-                error_count += 1
-                continue
-
-        logging.info(f"Alias download complete:")
-        logging.info(f"  - Constituents with aliases: {processed_count}")
-        logging.info(f"  - Constituents without aliases: {skipped_count}")
-        logging.info(f"  - Errors: {error_count}")
-        logging.info(f"  - Total alias records collected: {len(all_aliases)}")
-
-        # Convert to DataFrame
-        if not all_aliases:
-            logging.warning("No alias data collected")
-            return pd.DataFrame()
-
-        # Flatten nested JSON if needed and create DataFrame
-        df = pd.DataFrame((flatten(v) for v in all_aliases))
-
-        # Convert ID columns to Int64
-        id_cols = [x for x in df.columns if (x == 'id' or '_id' in x) and x not in ('lookup_id',)]
-        for col in id_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
-
-        # Detect and convert date columns
-        date_cols = [c for c in df.columns if 'date' in c.lower() and 'birth' not in c.lower()
-                     and 'deceased' not in c.lower() and not c.lower().endswith(('_y', '_d', '_m'))]
-        if date_cols:
-            for c in date_cols:
-                df[c] = pd.to_datetime(df[c], utc=True, errors='coerce')
-
-        # Export to CSV
-        try:
-            df.to_csv("Data Dumps/alias_list.csv", index=False, quoting=1, lineterminator='\r\n')
-            logging.info(f"Exported alias_list to CSV with {len(df)} rows")
-        except Exception as e:
-            logging.warning(f"Failed to export CSV for alias_list: {e}")
-
-        logging.info(f"Successfully created alias DataFrame with {len(df)} rows and {len(df.columns)} columns")
-        return df
-
-    except Exception as e:
-        logging.exception(f"Error downloading alias data: {e}")
-        return pd.DataFrame()
-
-
 # ------------------------------- Worker function for parallel database loading -------------------------------
 
 def load_table_to_db_worker(args: Tuple) -> Tuple[str, bool]:
@@ -1107,7 +974,6 @@ if __name__ == "__main__":
         'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields?limit=5000',
         'notes': 'https://api.sky.blackbaud.com/constituent/v1/notes?limit=5000',
         'opportunity_list': 'https://api.sky.blackbaud.com/opportunity/v1/opportunities?limit=5000',
-        # alias_list is handled separately after constituent_list is loaded
     }
 
     pk_plan = [
@@ -1116,7 +982,7 @@ if __name__ == "__main__":
         ('action_list', 'id'), ('address_list', 'id'), ('relationship_list', 'id'),
         ('email_list', 'id'), ('online_presence_list', 'id'), ('gift_custom_fields', 'id'),
         ('constituent_custom_fields', 'id'), ('constituent_code_list', 'id'),
-        ('notes', 'id'), ('opportunity_list', 'id'), ('alias_list', 'id')
+        ('notes', 'id'), ('opportunity_list', 'id')
     ]
     pk_map = dict(pk_plan)
 
@@ -1206,7 +1072,7 @@ if __name__ == "__main__":
         # Batch 3: Tables that depend on constituent_list
         ['action_list', 'phone_list', 'school_list', 'email_list',
          'online_presence_list', 'constituent_code_list', 'address_list',
-         'relationship_list', 'constituent_custom_fields', 'notes', 'alias_list'],
+         'relationship_list', 'constituent_custom_fields', 'notes'],
         # Batch 4: gift_list (depends on constituent_list, fund_list, campaign_list)
         ['gift_list', 'opportunity_list'],
         # Batch 5: gift_custom_fields (depends on gift_list)
@@ -1270,7 +1136,7 @@ if __name__ == "__main__":
                 dependent_tables = ['action_list', 'phone_list', 'school_list', 'email_list',
                                    'online_presence_list', 'constituent_code_list', 'address_list',
                                    'relationship_list', 'constituent_custom_fields', 'gift_list',
-                                   'gift_custom_fields', 'notes', 'opportunity_list', 'alias_list']
+                                   'gift_custom_fields', 'notes', 'opportunity_list']
                 for dep_table in dependent_tables:
                     load_results[dep_table] = False
                 logging.info(f"Marked {len(dependent_tables)} dependent tables as failed due to constituent_list failure")
@@ -1280,34 +1146,6 @@ if __name__ == "__main__":
                 load_results['gift_custom_fields'] = False
         else:
             logging.info(f"Batch {batch_num} completed successfully")
-
-        # After Batch 2 (constituent_list) completes successfully, download alias data
-        if batch_num == 2 and 'constituent_list' in load_results and load_results['constituent_list']:
-            logging.info("=" * 80)
-            logging.info("Batch 2 complete. Now downloading alias data for all constituents...")
-            logging.info("=" * 80)
-
-            if DEBUG_MODE:
-                # In DEBUG mode, load from CSV if available
-                logging.info("DEBUG MODE: Loading alias_list from CSV")
-                alias_df, alias_complete = load_table_from_csv('alias_list')
-                if not alias_df.empty and alias_complete:
-                    table_dfs['alias_list'] = alias_df
-                    logging.info(f"Loaded alias_list from CSV with {len(alias_df)} rows")
-                else:
-                    logging.warning("Failed to load alias_list from CSV or file not found")
-                    table_dfs['alias_list'] = pd.DataFrame()
-            else:
-                # Normal mode - download from API
-                alias_df = download_alias_data_for_all_constituents(
-                    RE_API_KEY, DB_NAME_1, DB_IP, DB_USERNAME, DB_PASSWORD
-                )
-                if not alias_df.empty:
-                    table_dfs['alias_list'] = alias_df
-                    logging.info(f"Successfully downloaded alias data with {len(alias_df)} rows")
-                else:
-                    logging.warning("No alias data downloaded or download failed")
-                    table_dfs['alias_list'] = pd.DataFrame()
 
         logging.info(f"Batch {batch_num} complete. Progress: {sum(1 for v in load_results.values() if v)}/{len(load_results)} tables loaded so far")
 
@@ -1328,7 +1166,6 @@ if __name__ == "__main__":
     CUSTOM_FK_RULES = [
         ('action_list', 'constituent_id', 'constituent_list', 'id'),
         ('address_list', 'constituent_id', 'constituent_list', 'id'),
-        ('alias_list', 'constituent_id', 'constituent_list', 'id'),
         ('constituent_code_list', 'constituent_id', 'constituent_list', 'id'),
         ('constituent_custom_fields', 'parent_id', 'constituent_list', 'id'),
         ('email_list', 'constituent_id', 'constituent_list', 'id'),
