@@ -80,7 +80,7 @@ def get_request_re(url):
         'Bb-Api-Subscription-Key': RE_API_KEY,
         'Authorization': 'Bearer ' + token
     }
-    response = http.get(url, params={}, headers=headers)
+    response = http.get(url, params={}, headers=headers, timeout=(10, 300))
     response.raise_for_status()
     return response.json()
 
@@ -538,10 +538,11 @@ def retry_with_backoff(func, max_retries=5, initial_delay=1, max_delay=60, backo
         except requests.exceptions.RequestException as e:
             last_exception = e
             if attempt < max_retries - 1:
-                # Check if it's a permanent error (4xx except 429)
+                # Check if it's a permanent error (4xx except 429, and 401 which
+                # may clear once the token file is refreshed and re-read)
                 if hasattr(e, 'response') and e.response is not None:
                     status_code = e.response.status_code
-                    if 400 <= status_code < 500 and status_code != 429:
+                    if 400 <= status_code < 500 and status_code not in (401, 429):
                         logging.error(f"Permanent error (status {status_code}), not retrying: {e}")
                         raise
 
@@ -645,15 +646,9 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> Tupl
                 page_num = 1
 
             # Paginate API and save to JSON files
-            token = retrieve_token()
-            if not token:
+            if not retrieve_token():
                 logging.critical(f"Failed to retrieve API token for {table_name}")
                 return pd.DataFrame(), False
-
-            headers = {
-                'Bb-Api-Subscription-Key': re_api_key,
-                'Authorization': 'Bearer ' + token
-            }
 
             downloaded_pages = checkpoint.get('downloaded_pages', [])
 
@@ -661,7 +656,21 @@ def download_table_data(table_name: str, endpoint: str, re_api_key: str) -> Tupl
                 try:
                     # Use retry logic with exponential backoff
                     def make_request():
-                        response = http.get(url, params={}, headers=headers)
+                        # Re-read the token on every request so tokens refreshed
+                        # by an external job are picked up mid-download
+                        # (access tokens expire after 60 minutes).
+                        try:
+                            token = retrieve_token()
+                        except (ValueError, OSError) as te:
+                            # Token file may be mid-rewrite by the refresh job
+                            raise requests.exceptions.RequestException(f"Could not read token file: {te}")
+                        if not token:
+                            raise requests.exceptions.RequestException("Token file has no access_token")
+                        headers = {
+                            'Bb-Api-Subscription-Key': re_api_key,
+                            'Authorization': 'Bearer ' + token
+                        }
+                        response = http.get(url, params={}, headers=headers, timeout=(10, 300))
                         response.raise_for_status()
                         return response.json()
 
@@ -958,22 +967,22 @@ if __name__ == "__main__":
     }
 
     data_to_download = {
-        'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000&include_inactive=true&include_deceased=true',
-        'fund_list': 'https://api.sky.blackbaud.com/fundraising/v1/funds?limit=5000',
-        'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns?limit=5000',
-        'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones?limit=5000&include_inactive=true',
-        'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations?limit=5000',
-        'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions?limit=5000',
-        'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses?limit=5000',
-        'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships?limit=5000',
-        'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000&include_inactive=true',
-        'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000&include_inactive=true',
-        'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000&include_inactive=true',
+        # 'constituent_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents?limit=5000&include_inactive=true&include_deceased=true',
+        # 'fund_list': 'https://api.sky.blackbaud.com/fundraising/v1/funds?limit=5000',
+        # 'campaign_list': 'https://api.sky.blackbaud.com/nxt-data-integration/v1/re/campaigns?limit=5000',
+        # 'phone_list': 'https://api.sky.blackbaud.com/constituent/v1/phones?limit=5000&include_inactive=true',
+        # 'school_list': 'https://api.sky.blackbaud.com/constituent/v1/educations?limit=5000',
+        # 'action_list': 'https://api.sky.blackbaud.com/constituent/v1/actions?limit=5000',
+        # 'address_list': 'https://api.sky.blackbaud.com/constituent/v1/addresses?limit=5000',
+        # 'relationship_list': 'https://api.sky.blackbaud.com/constituent/v1/relationships?limit=5000',
+        # 'email_list': 'https://api.sky.blackbaud.com/constituent/v1/emailaddresses?limit=5000&include_inactive=true',
+        # 'online_presence_list': 'https://api.sky.blackbaud.com/constituent/v1/onlinepresences?limit=5000&include_inactive=true',
+        # 'constituent_code_list': 'https://api.sky.blackbaud.com/constituent/v1/constituents/constituentcodes?limit=5000&include_inactive=true',
         'constituent_custom_fields': 'https://api.sky.blackbaud.com/constituent/v1/constituents/customfields?limit=5000',
-        'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts?limit=5000',
-        'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields?limit=5000',
-        'notes': 'https://api.sky.blackbaud.com/constituent/v1/notes?limit=5000',
-        'opportunity_list': 'https://api.sky.blackbaud.com/opportunity/v1/opportunities?limit=5000',
+        # 'gift_list': 'https://api.sky.blackbaud.com/gift/v1/gifts?limit=5000',
+        # 'gift_custom_fields': 'https://api.sky.blackbaud.com/gift/v1/gifts/customfields?limit=5000',
+        # 'notes': 'https://api.sky.blackbaud.com/constituent/v1/notes?limit=5000',
+        # 'opportunity_list': 'https://api.sky.blackbaud.com/opportunity/v1/opportunities?limit=5000',
     }
 
     pk_plan = [
